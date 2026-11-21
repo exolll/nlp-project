@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "projectpilot-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.6,<1", "uvicorn>=0.32,<1", "pydantic>=2.9,<3",
+  "pydantic-settings>=2.6,<3", "python-multipart>=0.0.20,<1",
+  "PyMuPDF>=1.24,<2", "python-docx>=1.2,<2",
+  # Newer filelock releases import SQLite-backed lock variants at module import.
+  "filelock==3.20.3", "boto3>=1.36,<2", "httpx>=0.28,<1"
+]
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+[tool.setuptools.packages.find]
+include = ["app*"]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
