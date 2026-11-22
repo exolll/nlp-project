@@ -11,7 +11,8 @@ dependencies = [
   "pydantic-settings>=2.6,<3", "python-multipart>=0.0.20,<1",
   "PyMuPDF>=1.24,<2", "python-docx>=1.2,<2",
   # Newer filelock releases import SQLite-backed lock variants at module import.
-  "filelock==3.20.3", "boto3>=1.36,<2", "httpx>=0.28,<1"
+  "filelock==3.20.3", "boto3>=1.36,<2", "httpx>=0.28,<1",
+  "SQLAlchemy>=2.0.36,<3", "alembic>=1.16,<2", "PyMySQL>=1.1.1,<2"
 ]
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
