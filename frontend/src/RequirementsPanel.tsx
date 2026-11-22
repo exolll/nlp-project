@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Failure, request } from './api'
+import SearchPanel from './SearchPanel'
 import type { NormalizedDocument } from './api'
 import {
   contentChanged, createDraft, draftIssues, evidenceSlice, fields, isPending, languageGroupIssue,
@@ -236,7 +237,7 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
   }
   return <section className="card requirements-panel" aria-labelledby="requirements-title">
     <div className="card-title"><div><span className="section-index">03 / REQUIREMENTS</span><h2 id="requirements-title">需求提取与确认</h2></div><span className={`badge ${selected?.status === 'confirmed' ? 'success' : ''}`}>{job ? jobLabels[job.status] : '等待提取'}</span></div>
-    <p className="stage-boundary">当前阶段仅确认需求，尚未搜索 GitHub。不生成推荐、不进入数据库阶段。</p>
+    <p className="stage-boundary">确认需求不会自动搜索 GitHub；已确认版本可在下方单独授权搜索预算并查看候选证据。</p>
     <div className="extraction-consent"><div><strong>由你决定何时发送给模型</strong><p>点击“提取需求”或“重新提取”后，已解析的文档与补充文本将发送到后端配置的 DeepSeek 服务，可能产生 API 费用。仅预览、刷新或切换任务不会触发模型调用。请先检查材料中是否含有不应发送的敏感信息。</p><small>费用以服务方实际计量为准；不在前端配置模型密钥。</small></div><div className="requirement-actions">
       <button className="primary" disabled={!canNewExtraction} onClick={() => void extract()}>{operation === 'extract' ? '正在提交…' : job?.status === 'failed' || attempt?.state === 'failed' ? '重新提取（新请求）' : '提取需求'}</button>
       <button className="secondary" disabled={reading || !!operation} onClick={() => void refresh(true)}>{reading ? '正在读取…' : '刷新核对状态'}</button>
@@ -271,5 +272,6 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
       {validationIssues.length > 0 && <div className="warning" role="alert"><strong>保存前请检查</strong><ul>{validationIssues.map(issue => <li key={issue}>{issue}</li>)}</ul></div>}
       <div className="revision-save"><label htmlFor="change-reason">保存理由 <span>保存新版本时必填</span></label><textarea id="change-reason" rows={2} maxLength={2000} value={draft.reason} disabled={!editable} placeholder="说明修改了什么、为何这样修改…" onChange={event => updateDraft(value => ({ ...value, reason: event.target.value }))} /><div className="revision-buttons"><button className="primary" disabled={writeBlocked || !editable || validationIssues.length > 0 || !draft.reason.trim() || (!changed && selected.status !== 'confirmed')} onClick={() => void saveRevision()}>{operation === 'save' ? '正在保存…' : '保存为新版本（不确认）'}</button><button className="secondary confirm-button" disabled={writeBlocked || dirty || unresolved || !!languagesIssue || selected.status === 'confirmed'} onClick={() => void confirmRevision()}>{operation === 'confirm' ? '正在确认…' : selected.status === 'confirmed' ? '此版本已确认' : '确认此版本'}</button></div><p className="muted">{!latest ? '历史版本不可编辑或确认。' : dirty ? '有未保存的编辑，请先填写理由并保存新版本，再单独确认。' : unresolved ? '仍有未解决歧义，确认已禁用。' : languagesIssue ? languagesIssue : !synced ? '请先刷新核对状态，成功读取后才能提交。' : '确认不会搜索 GitHub 或启动后续阶段。'} 切换版本保留本页编辑；离开任务或刷新整页前请先保存。</p></div>
     </>}
+    {selected?.status === 'confirmed' ? <SearchPanel key={`${document.task_id}.${selected.revision_id}`} taskId={document.task_id} revisionId={selected.revision_id} enabled={synced && !reading && !operation && !pending && !dirty && !draft?.editing} /> : <p className="stage-boundary">请先单独确认需求版本，之后才能授权候选搜索。</p>}
   </section>
 }

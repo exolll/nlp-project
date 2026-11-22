@@ -2,11 +2,14 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import hashlib
 import re
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from app.schemas.search import SearchIntegrityError, SearchStateError
-from app.services.search_contracts import SNAPSHOT_KEY_ALGORITHM, snapshot_key
+from app.services.search_contracts import (
+    DEEP_CHECK_VERSION, SNAPSHOT_KEY_ALGORITHM, deep_check_findings, deep_check_recommendation,
+    deep_check_sort_key, snapshot_key)
 from app.services.storage import CASConflict, StorageError
 
 _STAGES = ('prepared', 'staged', 'object_verified', 'snapshot_committed', 'completed')
@@ -17,6 +20,22 @@ _OP_IDENTITY = ('operation_id', 'repository_id', 'commit_sha', 'readme_path',
                 'staging_key', 'byte_length', 'created_at', 'collected_at',
                 'snapshot_key_algorithm')
 _ERRORS = ('integrity', 'terminal', 'transient', 'outcome_unknown')
+_DEEP_KEYS = {'operation_id', 'version', 'revision_hash', 'plan_hash', 'status', 'model_alias',
+              'prompt_version', 'input_hash', 'prompt_hash', 'config_hash', 'response_key',
+              'response_hash', 'report_key', 'report_hash', 'report', 'usage', 'provider_usage',
+              'published', 'error_code', 'created_at', 'updated_at'}
+_DEEP_STATUSES = ('dispatched', 'recorded', 'completed', 'failed')
+_DEEP_ADVANCE = {'dispatched': ('recorded', 'completed', 'failed'),
+                 'recorded': ('completed', 'failed'), 'completed': (), 'failed': ()}
+_DEEP_MUTABLE = ('status', 'updated_at', 'error_code', 'response_hash', 'provider_usage',
+                 'report', 'report_hash', 'usage', 'published')
+_DEEP_BASIS = ('model', 'no_response', 'citation_rejected', 'not_fed', 'snapshot_unavailable')
+_DEEP_ITEM_FIELDS = ('requirement_item_id', 'text', 'modality', 'operator', 'logic_group_id')
+_DEEP_TOKENS = frozenset({'prompt_tokens', 'completion_tokens', 'total_tokens',
+                          'prompt_cache_hit_tokens', 'prompt_cache_miss_tokens'})
+_DEEP_REJECTIONS = ('out_of_range', 'too_long', 'too_many', 'duplicated', 'no_valid_citation')
+_DEEP_ANOMALIES = ('unknown_candidate', 'duplicate_candidate', 'unknown_item', 'duplicate_item')
+_DEEP_MODALITIES = ('required', 'preferred', 'prohibited', 'informational')
 
 
 def _require(condition, message, error=SearchIntegrityError):
@@ -136,6 +155,161 @@ def _operation(op):
                  'Completed snapshot identity mismatch')
 
 
+def _deep(m):
+    """Recompute the whole deep check contract; stored facts must re-derive exactly."""
+    op = m['deep_check_operation']
+    _require(type(op) is dict and set(op) == _DEEP_KEYS, 'Invalid deep check fields')
+    _uuid(op['operation_id'])
+    _require(op['operation_id'] == str(uuid5(UUID(m['run_id']), DEEP_CHECK_VERSION)),
+             'Invalid deep check operation ID')
+    _require(op['version'] == op['prompt_version'] == DEEP_CHECK_VERSION, 'Invalid deep check version')
+    for field in ('revision_hash', 'plan_hash', 'input_hash', 'prompt_hash', 'config_hash'):
+        _hex(op[field])
+    for field in ('response_hash', 'report_hash'):
+        if op[field] is not None:
+            _hex(op[field])
+    _require(op['response_key'] == f"deep-check-responses/{op['operation_id']}.json" and
+             op['report_key'] == f"deep-check-reports/{op['operation_id']}.json",
+             'Invalid deep check object keys')
+    _require(op['status'] in _DEEP_STATUSES and type(op['published']) is bool, 'Invalid deep check state')
+    _require(type(op['model_alias']) is str and 0 < len(op['model_alias']) <= 128,
+             'Invalid deep check model alias')
+    for field in ('created_at', 'updated_at'):
+        _time(op[field])
+    _require(m['plan_publication_status'] == 'published' and op['plan_hash'] == m['plan']['plan_hash'] and
+             m['dispatch_closed'] and all(row['operation_status'] in ('completed', 'interrupted')
+             for row in m['readme_persistence_operations'].values()), 'Unstable deep check sources')
+    if 'planner_operation' in m:
+        _require(op['revision_hash'] == m['planner_operation']['revision_hash'],
+                 'Deep check revision mismatch')
+    for field in ('candidate_screening', 'evidence_operation'):
+        if field in m:
+            _require(op['revision_hash'] == m[field]['revision_hash'], 'Deep check revision mismatch')
+    completed = {row['snapshot_id'] for row in m['readme_persistence_operations'].values()
+                 if row['operation_status'] == 'completed'}
+    _require(type(op['usage']) is dict and set(op['usage']) <= completed and
+             all(type(value) is bool for value in op['usage'].values()), 'Invalid deep check usage')
+    _require(type(op['provider_usage']) is dict and
+             all(key in _DEEP_TOKENS and type(value) is int and 0 <= value <= 2**63 - 1
+                 for key, value in op['provider_usage'].items()), 'Invalid deep check token usage')
+    if op['status'] == 'dispatched':
+        _require(op['response_hash'] is None and op['report'] is None and op['report_hash'] is None and
+                 not op['provider_usage'] and not op['published'] and not any(op['usage'].values()) and
+                 op['error_code'] is None, 'Deep check facts arrived too early')
+    elif op['status'] == 'recorded':
+        _require(op['response_hash'] is not None and op['report'] is None and
+                 not op['published'] and not any(op['usage'].values()) and
+                 op['error_code'] is None, 'Deep check facts arrived too early')
+    elif op['status'] == 'failed':
+        _require(op['report'] is None and op['report_hash'] is None and not op['published'] and
+                 not any(op['usage'].values()) and type(op['error_code']) is str and op['error_code'],
+                 'Failed deep check has facts')
+    else:
+        _require(op['report_hash'] is not None and type(op['report']) is dict and
+                 op['error_code'] is None, 'Incomplete deep check report')
+    report = op['report']
+    if report is None:
+        return
+    _require(type(report) is dict and set(report) == set(_IDENTITIES).union({
+        'version', 'warning', 'requirement_items', 'candidates', 'anomalies'}) and
+        report['version'] == DEEP_CHECK_VERSION and
+        all(report.get(key) == m[key] for key in _IDENTITIES) and
+        type(report['warning']) is str and bool(report['warning']) and
+        hashlib.sha256(_encode(report)).hexdigest() == op['report_hash'], 'Deep check report identity differs')
+    items = report['requirement_items']
+    _require(type(items) is list and bool(items), 'Invalid deep check requirements')
+    seen = set()
+    for item in items:
+        _require(type(item) is dict and set(item) == set(_DEEP_ITEM_FIELDS) and
+                 type(item['text']) is str and bool(item['text']) and
+                 item['modality'] in _DEEP_MODALITIES and
+                 item['operator'] in ('ALL', 'ANY', 'not_applicable'), 'Invalid deep check requirement')
+        _uuid(item['requirement_item_id'])
+        _require(item['requirement_item_id'] not in seen, 'Duplicate deep check requirement')
+        seen.add(item['requirement_item_id'])
+    rows = report['candidates']
+    _require(type(rows) is list and len(rows) == len(m['candidates']) and
+             {row['repository_id'] for row in rows} == set(m['candidates']),
+             'Deep check candidate coverage differs')
+    fed = set()
+    for rank, row in enumerate(rows):
+        _require(type(row) is dict and set(row) == {'repository_id', 'rank', 'availability',
+                 'input_coverage', 'input_bytes', 'source', 'recommendation', 'missing_features',
+                 'risk_notes', 'items'}, 'Invalid deep check candidate')
+        _require(row['rank'] == rank and type(row['input_bytes']) is int and row['input_bytes'] >= 0,
+                 'Invalid deep check ranking')
+        _require(row['availability'] in ('available', 'no_snapshot', 'non_utf8') and
+                 row['input_coverage'] in ('full', 'truncated', 'not_fed'), 'Invalid deep check source state')
+        candidate = m['candidates'][row['repository_id']]
+        source = row['source']
+        _require((source is not None) == (row['availability'] != 'no_snapshot'),
+                 'Deep check source availability differs')
+        _require((row['input_bytes'] > 0) == (row['input_coverage'] != 'not_fed'),
+                 'Deep check input bytes differ')
+        _require(row['availability'] == 'available' or row['input_coverage'] == 'not_fed',
+                 'Deep check fed an unreadable snapshot')
+        if source is None:
+            _require(candidate.get('collection_status') != 'completed', 'Missing deep check source')
+        else:
+            formal = m['readme_persistence_operations'].get(candidate.get('operation_id'), {})
+            _require(formal.get('operation_status') == 'completed' and
+                     all(source.get(key) == formal.get(key) for key in
+                         ('snapshot_id', 'commit_sha', 'readme_path', 'blob_sha', 'content_hash')),
+                     'Deep check source differs')
+            if row['input_coverage'] != 'not_fed':
+                fed.add(source['snapshot_id'])
+        _require([{key: item.get(key) for key in _DEEP_ITEM_FIELDS} for item in row['items']] == items,
+                 'Deep check item coverage differs')
+        for item in row['items']:
+            _require(type(item) is dict and
+                     set(item) == set(_DEEP_ITEM_FIELDS).union({'verdict', 'basis', 'citations', 'rejections'}) and
+                     item['verdict'] in ('supports', 'contradicts', 'insufficient') and
+                     item['basis'] in _DEEP_BASIS and type(item['citations']) is list and
+                     len(item['citations']) <= 2 and type(item['rejections']) is list and
+                     all(reason in _DEEP_REJECTIONS for reason in item['rejections']),
+                     'Invalid deep check verdict')
+            _require(item['verdict'] == 'insufficient' or (item['citations'] and item['basis'] == 'model'),
+                     'Unsupported deep check verdict')
+            _require(item['basis'] == 'model' or not item['citations'], 'Deep check citation without a verdict')
+            if row['input_coverage'] == 'not_fed':
+                _require(item['verdict'] == 'insufficient' and not item['citations'] and
+                         item['basis'] == ('not_fed' if row['availability'] == 'available' else 'snapshot_unavailable'),
+                         'Deep check verdict without input')
+            else:
+                _require(item['basis'] in ('model', 'no_response', 'citation_rejected'),
+                         'Invalid deep check basis')
+            for quote in item['citations']:
+                _require(type(quote) is dict and
+                         set(quote) == {'text', 'byte_start', 'byte_end', 'line_start', 'line_end'} and
+                         type(quote['text']) is str and bool(quote['text']) and
+                         all(type(quote[key]) is int for key in
+                             ('byte_start', 'byte_end', 'line_start', 'line_end')) and
+                         0 <= quote['byte_start'] < quote['byte_end'] and
+                         quote['byte_end'] - quote['byte_start'] == len(quote['text'].encode('utf-8')) and
+                         1 <= quote['line_start'] <= quote['line_end'], 'Invalid deep check citation')
+        _require(row['recommendation'] == deep_check_recommendation(
+            row['items'], availability=row['availability'],
+            input_coverage=row['input_coverage']), 'Deep check recommendation differs')
+        findings = deep_check_findings(row['items'])
+        _require(row['missing_features'] == findings['missing_features'] and
+                 row['risk_notes'] == findings['risk_notes'], 'Deep check findings differ')
+    _require([deep_check_sort_key(row) for row in rows] == sorted(deep_check_sort_key(row) for row in rows),
+             'Deep check ranking is not ordered')
+    # A recorded provider response exists exactly when the model was actually given content.
+    _require((op['response_hash'] is not None) == bool(fed), 'Deep check response coverage differs')
+    anomalies = report['anomalies']
+    _require(type(anomalies) is list and
+             len({(row.get('repository_id'), row.get('code')) for row in anomalies}) == len(anomalies) and
+             all(type(row) is dict and set(row) == {'repository_id', 'code'} and
+                 type(row['repository_id']) is str and re.fullmatch(r'[1-9][0-9]*', row['repository_id']) and
+                 row['code'] in _DEEP_ANOMALIES and
+                 (row['code'] == 'unknown_candidate') == (row['repository_id'] not in m['candidates'])
+                 for row in anomalies), 'Invalid deep check anomalies')
+    _require(set(op['usage']) == fed and
+             (not op['published'] or (op['status'] == 'completed' and all(op['usage'].values()))),
+             'Invalid deep check publication')
+
+
 def _validate(m, owner, run_id):
     _require(type(m) is dict and set(_IDENTITIES).union({
         'run_status', 'plan_publication_status', 'plan', 'candidates',
@@ -184,10 +358,157 @@ def _validate(m, owner, run_id):
         _require(m['dispatch_closed'] and m['plan_publication_status'] == 'published' and
                  all(op['operation_status'] == 'completed'
                      for op in m['readme_persistence_operations'].values()), 'Premature run completion')
+    for field in ('candidate_screening', 'evidence_operation'):
+        if field not in m:
+            continue
+        review = m[field]
+        _require(type(review) is dict, 'Invalid review')
+        _hex(review.get('revision_hash'))
+        _require(m['plan_publication_status'] == 'published' and
+                 review.get('plan_hash') == m['plan']['plan_hash'], 'Review plan mismatch')
+        if 'planner_operation' in m:
+            _require(review['revision_hash'] == m['planner_operation']['revision_hash'], 'Review revision mismatch')
+    if 'candidate_screening' in m:
+        screening = m['candidate_screening']
+        _require(set(screening) == {'version', 'revision_hash', 'plan_hash', 'candidates', 'warning'} and
+                 screening['version'] == 'candidate-screening-v1', 'Invalid screening version')
+        rows = screening['candidates']
+        _require(type(rows) is list and len(rows) == len(m['candidates']) and
+                 {row['repository_id'] for row in rows} == set(m['candidates']), 'Screening coverage differs')
+        for row in rows:
+            _require(set(row) == {'repository_id', 'eligible', 'metadata_mentions', 'priority', 'reason'} and
+                     row['eligible'] is True and type(row['metadata_mentions']) is list and
+                     type(row['priority']) is int and row['priority'] == len(row['metadata_mentions']) and
+                     row['reason'] in ('literal_metadata_mentions', 'unknown_retained'), 'Invalid screening result')
+    if 'evidence_operation' in m:
+        op = m['evidence_operation']
+        _require(set(op) == {'operation_id', 'version', 'revision_hash', 'plan_hash', 'storage_key',
+                            'report_hash', 'report', 'usage', 'published'}, 'Invalid evidence operation')
+        _uuid(op['operation_id'])
+        _hex(op['report_hash'])
+        _require(op['version'] == 'evidence-review-v1' and
+                 op['storage_key'] == f"evidence-reviews/{op['operation_id']}.json", 'Invalid evidence identity')
+        _require(m['dispatch_closed'] and all(value['operation_status'] in ('completed', 'interrupted')
+                 for value in m['readme_persistence_operations'].values()), 'Unstable evidence sources')
+        if 'candidate_screening' in m:
+            _require(op['revision_hash'] == m['candidate_screening']['revision_hash'], 'Review revisions differ')
+        report = op['report']
+        _require(type(report) is dict and set(report) == set(_IDENTITIES).union({
+            'version', 'warning', 'requirement_items', 'candidates'}) and
+            report['version'] == 'evidence-review-v1', 'Invalid evidence report schema')
+        items = report['requirement_items']
+        _require(type(items) is list, 'Invalid evidence requirements')
+        item_ids = set()
+        for item in items:
+            _require(type(item) is dict and set(item) == {'requirement_item_id', 'text', 'modality',
+                     'operator', 'logic_group_id'}, 'Invalid evidence requirement')
+            _uuid(item['requirement_item_id'])
+            _require(item['requirement_item_id'] not in item_ids and type(item['text']) is str and
+                     bool(item['text']) and item['modality'] in ('required', 'preferred', 'prohibited', 'informational') and
+                     item['operator'] in ('ALL', 'ANY', 'not_applicable'), 'Invalid evidence requirement identity')
+            item_ids.add(item['requirement_item_id'])
+        _require(type(report) is dict and all(report.get(key) == m[key] for key in _IDENTITIES) and
+                 hashlib.sha256(_encode(report)).hexdigest() == op['report_hash'], 'Evidence report identity differs')
+        rows = report.get('candidates')
+        _require(type(rows) is list and len(rows) == len(m['candidates']) and
+                 {row['repository_id'] for row in rows} == set(m['candidates']), 'Evidence candidate coverage differs')
+        sources = set()
+        for row in rows:
+            _require(type(row) is dict and set(row) == {'repository_id', 'availability', 'source', 'items'} and
+                     type(row['items']) is list, 'Invalid evidence candidate')
+            candidate = m['candidates'][row['repository_id']]
+            source = row['source']
+            if source is not None:
+                formal = m['readme_persistence_operations'].get(candidate.get('operation_id'), {})
+                _require(formal.get('operation_status') == 'completed' and
+                         all(source.get(key) == formal.get(key) for key in
+                             ('snapshot_id', 'commit_sha', 'readme_path', 'blob_sha', 'content_hash')),
+                         'Evidence source differs')
+                sources.add(source['snapshot_id'])
+            else:
+                _require(candidate.get('collection_status') != 'completed' and row['availability'] == 'no_snapshot',
+                         'Missing evidence source')
+            _require(row['availability'] in ('available', 'no_snapshot', 'non_utf8'), 'Invalid availability')
+            fields = ('requirement_item_id', 'text', 'modality', 'operator', 'logic_group_id')
+            _require([{key: item.get(key) for key in fields} for item in row['items']] == report['requirement_items'],
+                     'Evidence item coverage differs')
+            for item in row['items']:
+                _require(set(item) == set(fields).union({'status', 'quotes'}) and type(item['quotes']) is list,
+                         'Invalid evidence item schema')
+                for quote in item['quotes']:
+                    _require(type(quote) is dict and set(quote) == {'text', 'byte_start', 'byte_end', 'line_start', 'line_end'} and
+                             type(quote['text']) is str and bool(quote['text']) and
+                             all(type(quote[key]) is int for key in ('byte_start', 'byte_end', 'line_start', 'line_end')) and
+                             0 <= quote['byte_start'] < quote['byte_end'] and
+                             quote['byte_end'] - quote['byte_start'] == len(quote['text'].encode('utf-8')) and
+                             1 <= quote['line_start'] <= quote['line_end'], 'Invalid evidence quote')
+                _require(row['availability'] == 'available' or not item['quotes'], 'Unavailable source has quotes')
+                _require(item['status'] in ('mention_found', 'unconfirmed') and
+                         (item['status'] == 'mention_found') == bool(item['quotes']) and
+                         len(item['quotes']) <= 3, 'Invalid evidence conclusion')
+        _require(type(op['usage']) is dict and set(op['usage']) == sources and
+                 all(type(value) is bool for value in op['usage'].values()) and
+                 type(op['published']) is bool and
+                 (not op['published'] or all(op['usage'].values())), 'Invalid evidence publication')
+    if 'deep_check_operation' in m:
+        _deep(m)
     _encode(m)
 
 
 def _invariants(old, new):
+    if 'candidate_screening' in old:
+        _require(new.get('candidate_screening') == old['candidate_screening'], 'Immutable screening changed')
+    elif 'candidate_screening' in new:
+        _require(not old['dispatch_closed'] and not old['readme_persistence_operations'] and
+                 not old.get('search_execution', {}).get('readme_targets'), 'Screening registered too late')
+    if 'evidence_operation' in old:
+        previous, current = old['evidence_operation'], new.get('evidence_operation', {})
+        _require(all(current.get(key) == value for key, value in previous.items()
+                     if key not in ('usage', 'published')), 'Immutable evidence identity changed')
+        _require(not previous['published'] or current['published'], 'Evidence publication reversed')
+        _require(all(not value or current['usage'][key] for key, value in previous['usage'].items()),
+                 'Evidence usage reversed')
+        _require(old['candidates'] == new['candidates'] and
+                 old['readme_persistence_operations'].keys() == new['readme_persistence_operations'].keys() and
+                 all(all(op[field] == new['readme_persistence_operations'][key][field]
+                         for field in (*_OP_IDENTITY, 'snapshot_id', 'operation_status'))
+                     for key, op in old['readme_persistence_operations'].items()), 'Evidence sources changed')
+        if current != previous:
+            _require(not new['integrity_blocked'], 'Integrity blocks evidence publication')
+    elif 'evidence_operation' in new:
+        _require(old['dispatch_closed'] and not old['integrity_blocked'] and
+                 not new['evidence_operation']['published'] and
+                 not any(new['evidence_operation']['usage'].values()), 'Invalid initial evidence operation')
+    if 'deep_check_operation' in old:
+        previous, current = old['deep_check_operation'], new.get('deep_check_operation', {})
+        _require(all(current.get(key) == value for key, value in previous.items()
+                     if key not in _DEEP_MUTABLE), 'Immutable deep check identity changed')
+        _require(previous['status'] == current.get('status') or
+                 current['status'] in _DEEP_ADVANCE[previous['status']],
+                 'Illegal deep check transition', SearchStateError)
+        _require(not previous['published'] or current.get('published'), 'Deep check publication reversed')
+        _require(all(not value or current['usage'][key] for key, value in previous['usage'].items()),
+                 'Deep check usage reversed')
+        if previous['response_hash'] is not None:
+            _require(current.get('response_hash') == previous['response_hash'] and
+                     current.get('provider_usage') == previous['provider_usage'],
+                     'Recorded deep check response changed')
+        if previous['report'] is not None:
+            _require(current.get('report') == previous['report'] and
+                     current.get('report_hash') == previous['report_hash'], 'Published deep check report changed')
+        _require(old['candidates'] == new['candidates'] and
+                 old['readme_persistence_operations'].keys() == new['readme_persistence_operations'].keys() and
+                 all(all(op[field] == new['readme_persistence_operations'][key][field]
+                         for field in (*_OP_IDENTITY, 'snapshot_id', 'operation_status'))
+                     for key, op in old['readme_persistence_operations'].items()), 'Deep check sources changed')
+        if current != previous:
+            _require(not new['integrity_blocked'], 'Integrity blocks deep check publication')
+    elif 'deep_check_operation' in new:
+        created = new['deep_check_operation']
+        _require(old['dispatch_closed'] and not old['integrity_blocked'] and
+                 old['plan_publication_status'] == 'published' and created['status'] == 'dispatched' and
+                 not created['published'] and not any(created['usage'].values()),
+                 'Invalid initial deep check operation')
     for field in _IDENTITIES:
         _require(old[field] == new[field], 'Immutable manifest identity changed')
     if old['plan'] is not None:

@@ -54,7 +54,8 @@ class RequestBoundary:
         await self.app(scope, bounded_receive, tagged)
 
 
-def create_app(settings=None, storage=None, *, extraction_settings=None, extraction_transport=None):
+def create_app(settings=None, storage=None, *, extraction_settings=None, extraction_transport=None,
+               search_backend_factory=None):
     settings = settings or Settings()
     app = FastAPI()
     app.state.processor = process_document
@@ -243,6 +244,8 @@ def create_app(settings=None, storage=None, *, extraction_settings=None, extract
 
     from app.services.requirements import install_routes
     install_routes(app, state, owner, settings, extraction_settings, extraction_transport)
+    from app.services.search_routes import install_routes as install_search_routes
+    install_search_routes(app, state, owner, settings, search_backend_factory)
     return app
 
 

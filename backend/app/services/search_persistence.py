@@ -149,7 +149,7 @@ class SearchPersistence:
                 self._block(owner, run_id, 'PLAN_INTEGRITY')
                 raise
 
-    def read_plan(self, owner, run_id):
+    def read_plan(self, owner, run_id, *, read_only=False):
         manifest = self.manifests.read(owner, run_id)
         if manifest['integrity_blocked']:
             raise SearchIntegrityError('Run is blocked by an integrity failure')
@@ -162,7 +162,8 @@ class SearchPersistence:
                 raise SearchStateError('Plan projection is not ready')
             return plan
         except SearchIntegrityError:
-            self._block(owner, run_id, 'PLAN_INTEGRITY')
+            if not read_only:
+                self._block(owner, run_id, 'PLAN_INTEGRITY')
             raise
 
     def initialize_request_clock(self, run_references):
@@ -268,8 +269,8 @@ class SearchPersistence:
                 pass
             raise
 
-    def read_snapshot(self, owner, run_id, snapshot_id):
-        self.read_plan(owner, run_id)
+    def read_snapshot(self, owner, run_id, snapshot_id, *, read_only=False):
+        self.read_plan(owner, run_id, read_only=read_only)
         manifest = self.manifests.read(owner, run_id)
         operations = [op for op in manifest['readme_persistence_operations'].values()
                       if op['operation_status'] == 'completed' and op['snapshot_id'] == snapshot_id]
@@ -287,7 +288,8 @@ class SearchPersistence:
             _verify_readme(raw, operation)
             return raw
         except SearchIntegrityError:
-            self.manifests.record_error(owner, run_id, operation['operation_id'], 'README_INTEGRITY', 'integrity')
+            if not read_only:
+                self.manifests.record_error(owner, run_id, operation['operation_id'], 'README_INTEGRITY', 'integrity')
             raise
 
     def record_usage(self, owner, run_id, snapshot_id, usage_type):

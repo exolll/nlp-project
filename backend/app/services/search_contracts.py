@@ -211,3 +211,72 @@ def validate_source_requirement_pointers(
         if not set(result).issubset(parents):
             raise SearchContractError('Query sources must be a subset of group sources')
     return result
+
+
+DEEP_CHECK_VERSION = 'deep-check-v1'
+DEEP_CHECK_HARD = frozenset({'required', 'prohibited'})
+DEEP_CHECK_LABELS = ('verify_further', 'partial_reference', 'insufficient', 'not_recommended')
+DEEP_CHECK_REASONS = frozenset({
+    'hard_requirement_conflict', 'all_hard_requirements_supported', 'partial_hard_support',
+    'no_hard_requirement_evidence', 'no_hard_requirement', 'snapshot_unavailable', 'input_truncated'})
+DEEP_CHECK_FINDINGS = frozenset({'insufficient', 'contradicts', 'prohibited_violation', 'preferred_conflict'})
+
+
+def deep_check_hard_results(items: list[dict]) -> list[str]:
+    """ALL fails on any conflict, ANY passes on any support; anything else is unknown."""
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        if item['modality'] not in DEEP_CHECK_HARD:
+            continue
+        groups.setdefault(item['logic_group_id'] or '#' + item['requirement_item_id'], []).append(item)
+    results = []
+    for members in groups.values():
+        verdicts = {member['verdict'] for member in members}
+        every = len(members) == 1 or members[0]['operator'] != 'ANY'
+        if every:
+            results.append('contradicts' if 'contradicts' in verdicts
+                           else 'supports' if verdicts == {'supports'} else 'insufficient')
+        else:
+            results.append('supports' if 'supports' in verdicts
+                           else 'contradicts' if verdicts == {'contradicts'} else 'insufficient')
+    return results
+
+
+def deep_check_recommendation(items: list[dict], *, availability: str, input_coverage: str) -> dict:
+    """Label candidate review priority; this is never a claim that requirements are met."""
+    if availability != 'available' or input_coverage == 'not_fed':
+        return {'label': 'insufficient', 'reason': 'snapshot_unavailable'}
+    results = deep_check_hard_results(items)
+    if not results:
+        return {'label': 'insufficient', 'reason': 'no_hard_requirement'}
+    if 'contradicts' in results:
+        label, reason = 'not_recommended', 'hard_requirement_conflict'
+    elif all(value == 'supports' for value in results):
+        label, reason = 'verify_further', 'all_hard_requirements_supported'
+    elif 'supports' in results:
+        label, reason = 'partial_reference', 'partial_hard_support'
+    else:
+        label, reason = 'insufficient', 'no_hard_requirement_evidence'
+    # Incomplete input coverage can prove a conflict but never prove completeness.
+    if input_coverage == 'truncated' and label != 'not_recommended':
+        return {'label': 'insufficient', 'reason': 'input_truncated'}
+    return {'label': label, 'reason': reason}
+
+
+def deep_check_findings(items: list[dict]) -> dict:
+    missing = [{'requirement_item_id': item['requirement_item_id'], 'text': item['text'],
+                'modality': item['modality'],
+                'reason': 'contradicts' if item['verdict'] == 'contradicts' else 'insufficient'}
+               for item in items if item['modality'] == 'required' and item['verdict'] != 'supports']
+    risks = [{'requirement_item_id': item['requirement_item_id'], 'text': item['text'],
+              'modality': item['modality'],
+              'reason': 'prohibited_violation' if item['modality'] == 'prohibited' else 'preferred_conflict'}
+             for item in items if item['modality'] in ('prohibited', 'preferred')
+             and item['verdict'] == 'contradicts']
+    return {'missing_features': missing, 'risk_notes': risks}
+
+
+def deep_check_sort_key(row: dict) -> tuple:
+    supports = sum(1 for item in row['items']
+                   if item['modality'] == 'required' and item['verdict'] == 'supports')
+    return (DEEP_CHECK_LABELS.index(row['recommendation']['label']), -supports, int(row['repository_id']))

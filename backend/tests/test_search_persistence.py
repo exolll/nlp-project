@@ -90,8 +90,7 @@ class FaultStorage(LocalStorage):
         super().compare_and_swap(key, expected, data)
 
 
-@pytest.fixture
-def context(tmp_path):
+def build_context(tmp_path):
     task_id, revision_id, run_id = str(uuid4()), str(uuid4()), str(uuid4())
     now = datetime.now(timezone.utc)
     revision = RequirementRevision(
@@ -118,6 +117,11 @@ def context(tmp_path):
     service = SearchPersistence(storage, repository)
     service.create_run(OWNER, task_id, revision, run_id)
     return service, storage, repository, revision, plan
+
+
+@pytest.fixture
+def context(tmp_path):
+    return build_context(tmp_path)
 
 
 def publish(context):

@@ -156,7 +156,7 @@ function App() {
   return <div className="app">
     <header className="topbar"><a className="brand" href="./"><span className="logo">P</span>ProjectPilot<span className="brand-sub">项目领航</span></a><span className="workspace"><i />个人工作区</span></header>
     <main>
-      <div className="intro"><div><div className="eyebrow">从一份材料，开始一个好项目</div><h1>让项目的起点，更清晰<span>。</span></h1><p>上传材料，主动提取并核对项目需求。当前仅到需求确认，尚未搜索 GitHub。</p></div><div className="phase"><span>02</span><div>需求确认<small>REQUIREMENTS</small></div></div></div>
+      <div className="intro"><div><div className="eyebrow">从一份材料，开始一个好项目</div><h1>让项目的起点，更清晰<span>。</span></h1><p>上传材料，主动提取并确认需求，再单独授权搜索候选与核对 README 证据。</p></div><div className="phase"><span>02</span><div>需求确认<small>REQUIREMENTS</small></div></div></div>
       <div className="steps"><b><span>1</span>输入与解析</b><div /><span>2 · 主动提取需求</span><div /><span>3 · 编辑并确认</span></div>
       <div className="columns">
         <section className="card input-card"><div className="card-title"><div><span className="section-index">01 / INPUT</span><h2>提供项目材料</h2></div><button className="text-button" disabled={locked} onClick={() => { setFile(null); setText(''); setError(null) }}>清空</button></div>
@@ -179,7 +179,7 @@ function App() {
       <section className="feedback" aria-live="polite">{progress !== null && <div className="upload-progress"><span>{progress === 100 ? '上传完成 · 解析中' : `上传中 ${progress}%`}</span><progress value={progress} max="100" /></div>}{notice && <p>{busy && <span className="spinner" />}{notice}</p>}{error && <div className="error" role="alert"><strong>{error.message}</strong><small>{error.info.error_code}{error.info.request_id && ` · 请求编号 ${error.info.request_id}`}</small>{error.info.details != null && <details><summary>错误详情</summary><pre>{JSON.stringify(error.info.details, null, 2)}</pre></details>}{error.status === 401 ? <button disabled={busy} onClick={() => { if (window.confirm('开始新的会话？旧历史仍会保留，但旧会话的任务可能无法访问。')) void connect(true) }}>重新开始会话</button> : !ready && <button disabled={busy} onClick={() => void connect()}>重新连接</button>}{pending && <p>上传结果未确认。请重试同一任务，或先从历史检查状态；当前材料已锁定以避免重复。</p>}</div>}</section>
       {document && <RequirementsPanel key={document.document_id} document={document} />}
       <section className="card history"><div className="card-title"><div><span className="section-index">YOUR WORKSPACE</span><h2>任务历史 <span className="history-count">{tasks.length}</span></h2></div><button className="text-button" disabled={busy || !ready} onClick={() => void run(history)}>刷新历史 ↻</button></div>{!tasks.length ? <div className="history-empty">还没有任务。提交第一份材料，记录会保存在当前会话中。</div> : <div className="history-list">{tasks.map(task => <button className={`history-row ${active === task.task_id ? 'selected' : ''}`} key={task.task_id} disabled={busy || !ready} onClick={() => openTask(task)}><span className="task-icon">▤</span><span className="task-name"><strong>任务 {task.task_id}</strong><small>{new Date(task.created_at).toLocaleString('zh-CN')}</small></span><span className={`task-status ${task.status}`}>{statusLabel(task.status)}</span><span>查看 →</span></button>)}</div>}<p className="history-note">刷新页面可恢复当前会话与任务历史。历史结果始终从服务端查询。</p></section>
-      <footer><span>ProjectPilot · 把想法变成清晰的起点</span><span>{config ? `${config.environment} / ${config.storage_backend}` : '本地工作区'} · 当前仅到需求确认</span></footer>
+      <footer><span>ProjectPilot · 把想法变成清晰的起点</span><span>{config ? `${config.environment} / ${config.storage_backend}` : '本地工作区'} · 搜索须单独授权</span></footer>
     </main>
   </div>
 }
