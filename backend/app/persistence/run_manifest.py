@@ -36,6 +36,13 @@ _DEEP_TOKENS = frozenset({'prompt_tokens', 'completion_tokens', 'total_tokens',
 _DEEP_REJECTIONS = ('out_of_range', 'too_long', 'too_many', 'duplicated', 'no_valid_citation')
 _DEEP_ANOMALIES = ('unknown_candidate', 'duplicate_candidate', 'unknown_item', 'duplicate_item')
 _DEEP_MODALITIES = ('required', 'preferred', 'prohibited', 'informational')
+_DEEP_REVIEW_KEYS = {'operation_id', 'status', 'revision_id', 'revision_hash', 'bundle_hash',
+                     'model', 'prompt_version', 'consent', 'authorized_at', 'deadline',
+                     'report_key', 'report_hash', 'error_code'}
+_DEEP_REVIEW_STATUSES = ('running', 'completed', 'partial', 'failed', 'unknown')
+_DEEP_REVIEW_TERMINALS = ('completed', 'partial', 'failed', 'unknown')
+_DEEP_REVIEW_IMMUTABLE = ('operation_id', 'revision_id', 'revision_hash', 'bundle_hash',
+                          'model', 'prompt_version', 'consent', 'authorized_at', 'deadline')
 
 
 def _require(condition, message, error=SearchIntegrityError):
@@ -310,6 +317,152 @@ def _deep(m):
              'Invalid deep check publication')
 
 
+def _deep_review(m):
+    op = m['deep_review_operation']
+    _require(type(op) is dict and set(op) == _DEEP_REVIEW_KEYS, 'Invalid deep review fields')
+    _uuid(op['operation_id'])
+    _uuid(op['revision_id'])
+    _require(op['revision_id'] == m['confirmed_revision_id'], 'Deep review revision mismatch')
+    for field in ('revision_hash', 'bundle_hash'):
+        _hex(op[field])
+    _require(type(op['model']) is str and 0 < len(op['model']) <= 128, 'Invalid deep review model')
+    _require(op['prompt_version'] == 'deep-review-v1' and op['consent'] is True,
+             'Invalid deep review authorization')
+    authorized, deadline = _time(op['authorized_at']), _time(op['deadline'])
+    _require(deadline > authorized, 'Invalid deep review deadline')
+    _require(op['status'] in _DEEP_REVIEW_STATUSES, 'Invalid deep review state')
+    if op['report_key'] is None:
+        _require(op['report_hash'] is None, 'Deep review report hash without key')
+    else:
+        _require(op['report_key'] == f"deep-reviews/{op['operation_id']}/report.json" and
+                 op['report_hash'] is not None, 'Invalid deep review report identity')
+        _hex(op['report_hash'])
+    if op['error_code'] is not None:
+        _require(type(op['error_code']) is str and
+                 re.fullmatch(r'[A-Za-z0-9_]{1,128}', op['error_code']), 'Invalid deep review error')
+    if op['status'] == 'running':
+        _require(op['report_key'] is None and op['error_code'] is None,
+                 'Running deep review carries terminal facts')
+    elif op['status'] in ('completed', 'partial'):
+        _require(op['report_key'] is not None and op['error_code'] is None,
+                 'Completed deep review requires a report')
+    else:
+        _require(op['report_key'] is not None or op['error_code'] is not None,
+                 'Failed deep review requires an outcome')
+    retrieval = m.get('evidence_bundle_operation')
+    _require(retrieval is not None and retrieval['status'] in ('ready', 'partial') and
+             m['dispatch_closed'] and not m['integrity_blocked'] and
+             m['plan_publication_status'] == 'published' and
+             all(row['operation_status'] in ('completed', 'interrupted')
+                 for row in m['readme_persistence_operations'].values()),
+             'Unstable deep review sources')
+    _require(op['bundle_hash'] == retrieval['bundle_hash'] and
+             op['revision_hash'] == retrieval['revision_hash'], 'Deep review bundle mismatch')
+
+
+_CHUNK_VERSION = 'chunk-index-v1'
+_CHUNK_STATUSES = ('pending', 'embedding', 'ready', 'failed')
+_CHUNK_KEYS = {'operation_id', 'version', 'index_key', 'revision_hash', 'plan_hash', 'model',
+               'dimension', 'preprocess_version', 'config_hash', 'status', 'chunk_manifest_key',
+               'chunk_manifest_hash', 'usage', 'error_code', 'failed_operation_ids',
+               'created_at', 'updated_at'}
+_CHUNK_ADVANCE = {'pending': ('embedding', 'ready', 'failed'),
+                  'embedding': ('ready', 'failed')}
+
+
+def _chunk_index(m):
+    op = m['chunk_index_operation']
+    _require(type(op) is dict and set(op) == _CHUNK_KEYS, 'Invalid chunk index fields')
+    _uuid(op['operation_id'])
+    _uuid(op['index_key'])
+    _require(op['version'] == _CHUNK_VERSION, 'Invalid chunk index version')
+    _require(type(op['model']) is str and 0 < len(op['model']) <= 128 and
+             type(op['dimension']) is int and op['dimension'] > 0 and
+             type(op['preprocess_version']) is str and 0 < len(op['preprocess_version']) <= 64,
+             'Invalid chunk index embedding identity')
+    for field in ('revision_hash', 'plan_hash', 'config_hash'):
+        _hex(op[field])
+    if op['chunk_manifest_hash'] is not None:
+        _hex(op['chunk_manifest_hash'])
+    _require(op['status'] in _CHUNK_STATUSES and
+             (op['error_code'] is None or (type(op['error_code']) is str and 0 < len(op['error_code']) <= 64)),
+             'Invalid chunk index state')
+    _require(m['plan_publication_status'] == 'published' and op['plan_hash'] == m['plan']['plan_hash'] and
+             m['dispatch_closed'] and all(row['operation_status'] in ('completed', 'interrupted')
+             for row in m['readme_persistence_operations'].values()), 'Unstable chunk index sources')
+    for field in ('planner_operation', 'candidate_screening', 'evidence_operation', 'deep_check_operation'):
+        if field in m:
+            _require(op['revision_hash'] == m[field]['revision_hash'], 'Chunk index revision mismatch')
+    completed = {row['snapshot_id'] for row in m['readme_persistence_operations'].values()
+                 if row['operation_status'] == 'completed'}
+    _require(type(op['usage']) is dict and set(op['usage']) <= completed and
+             all(type(value) is bool for value in op['usage'].values()), 'Invalid chunk index usage')
+    history = op['failed_operation_ids']
+    _require(type(history) is list and len(set(history)) == len(history) and
+             op['operation_id'] not in history, 'Invalid chunk index history')
+    for value in history:
+        _uuid(value)
+    for field in ('created_at', 'updated_at'):
+        _time(op[field])
+    key = f"chunk-index/{op['index_key']}/manifest.json"
+    if op['chunk_manifest_key'] is not None:
+        _require(op['chunk_manifest_key'] == key, 'Invalid chunk index object key')
+    if op['status'] == 'ready':
+        _require(op['chunk_manifest_hash'] is not None and op['chunk_manifest_key'] == key and
+                 op['error_code'] is None and set(op['usage']) == completed and
+                 all(op['usage'].values()), 'Incomplete chunk index readiness')
+    elif op['status'] == 'failed':
+        _require(op['error_code'] is not None and not any(op['usage'].values()),
+                 'Failed chunk index has published facts')
+    else:
+        _require(op['error_code'] is None, 'Pending chunk index carries an error')
+
+
+_RETRIEVAL_VERSIONS = ('evidence-bundle-v1', 'evidence-bundle-v2')
+_RETRIEVAL_KEYS = {'operation_id', 'version', 'revision_hash', 'plan_hash', 'chunk_index_key',
+                   'model', 'dimension', 'config_hash', 'storage_key', 'bundle_hash',
+                   'status', 'error_code', 'created_at', 'updated_at'}
+
+
+def _retrieval(m):
+    op = m['evidence_bundle_operation']
+    _require(type(op) is dict and set(op) == _RETRIEVAL_KEYS, 'Invalid retrieval bundle fields')
+    _uuid(op['operation_id'])
+    _uuid(op['chunk_index_key'])
+    _require(op['version'] in _RETRIEVAL_VERSIONS, 'Invalid retrieval bundle version')
+    _require(type(op['model']) is str and 0 < len(op['model']) <= 128 and
+             type(op['dimension']) is int and op['dimension'] > 0, 'Invalid retrieval embedding identity')
+    for field in ('revision_hash', 'plan_hash', 'config_hash', 'bundle_hash'):
+        _hex(op[field])
+    _require(op['storage_key'] == f"retrieval-bundles/{op['operation_id']}.json",
+             'Invalid retrieval bundle key')
+    _require(op['status'] in ('ready', 'partial', 'failed') and
+             (op['error_code'] is None or (type(op['error_code']) is str and 0 < len(op['error_code']) <= 64)),
+             'Invalid retrieval bundle state')
+    _require((op['status'] == 'failed') == (op['error_code'] is not None),
+             'Retrieval bundle error state differs')
+    for field in ('created_at', 'updated_at'):
+        _time(op[field])
+    _require(m['dispatch_closed'] and not m['integrity_blocked'] and
+             m['plan_publication_status'] == 'published' and
+             all(row['operation_status'] in ('completed', 'interrupted')
+                 for row in m['readme_persistence_operations'].values()),
+             'Unstable retrieval bundle sources')
+    for field in ('planner_operation', 'candidate_screening', 'evidence_operation',
+                  'deep_check_operation', 'deep_review_operation', 'chunk_index_operation'):
+        if field in m:
+            _require(op['revision_hash'] == m[field]['revision_hash'], 'Retrieval revision mismatch')
+    if 'chunk_index_operation' in m:
+        chunk = m['chunk_index_operation']
+        if chunk['status'] == 'ready':
+            _require(op['status'] != 'failed' and op['chunk_index_key'] == chunk['index_key'],
+                     'Retrieval bundle does not match a ready chunk index')
+            _require(op['model'] == chunk['model'] and op['dimension'] == chunk['dimension'],
+                     'Retrieval embedding identity differs')
+        else:
+            _require(op['status'] == 'failed', 'Retrieval bundle has no ready chunk index')
+
+
 def _validate(m, owner, run_id):
     _require(type(m) is dict and set(_IDENTITIES).union({
         'run_status', 'plan_publication_status', 'plan', 'candidates',
@@ -452,6 +605,12 @@ def _validate(m, owner, run_id):
                  (not op['published'] or all(op['usage'].values())), 'Invalid evidence publication')
     if 'deep_check_operation' in m:
         _deep(m)
+    if 'chunk_index_operation' in m:
+        _chunk_index(m)
+    if 'evidence_bundle_operation' in m:
+        _retrieval(m)
+    if 'deep_review_operation' in m:
+        _deep_review(m)
     _encode(m)
 
 
@@ -509,6 +668,81 @@ def _invariants(old, new):
                  old['plan_publication_status'] == 'published' and created['status'] == 'dispatched' and
                  not created['published'] and not any(created['usage'].values()),
                  'Invalid initial deep check operation')
+    if 'deep_review_operation' in old:
+        previous, current = old['deep_review_operation'], new.get('deep_review_operation')
+        _require(current is not None, 'Deep review operation removed')
+        _require(all(current[key] == previous[key] for key in _DEEP_REVIEW_IMMUTABLE),
+                 'Immutable deep review identity changed')
+        if previous['status'] in _DEEP_REVIEW_TERMINALS:
+            _require(current == previous, 'Terminal deep review cannot change')
+        else:
+            _require(current['status'] == 'running' or current['status'] in _DEEP_REVIEW_TERMINALS,
+                     'Illegal deep review transition', SearchStateError)
+        if previous['report_hash'] is not None:
+            _require(current['report_key'] == previous['report_key'] and
+                     current['report_hash'] == previous['report_hash'], 'Deep review report changed')
+        _require(old['candidates'] == new['candidates'] and
+                 old['readme_persistence_operations'].keys() == new['readme_persistence_operations'].keys() and
+                 all(all(op[field] == new['readme_persistence_operations'][key][field]
+                         for field in (*_OP_IDENTITY, 'snapshot_id', 'operation_status'))
+                     for key, op in old['readme_persistence_operations'].items()),
+                 'Deep review sources changed')
+        if current != previous:
+            _require(not new['integrity_blocked'], 'Integrity blocks deep review completion')
+    elif 'deep_review_operation' in new:
+        created = new['deep_review_operation']
+        _require(old['dispatch_closed'] and not old['integrity_blocked'] and
+                 old['plan_publication_status'] == 'published' and created['status'] == 'running' and
+                 created['report_key'] is None and created['report_hash'] is None and
+                 created['error_code'] is None, 'Invalid initial deep review operation')
+    if 'evidence_bundle_operation' in old:
+        _require(new.get('evidence_bundle_operation') == old['evidence_bundle_operation'],
+                 'Retrieval bundle is immutable')
+    elif 'evidence_bundle_operation' in new:
+        created = new['evidence_bundle_operation']
+        _require(old['dispatch_closed'] and not old['integrity_blocked'] and
+                 'chunk_index_operation' in old and
+                 (created['status'] == 'failed' or
+                  (old['chunk_index_operation']['status'] == 'ready' and
+                   created['chunk_index_key'] == old['chunk_index_operation']['index_key'])),
+                 'Invalid initial retrieval bundle')
+    if 'chunk_index_operation' in old:
+        previous, current = old['chunk_index_operation'], new.get('chunk_index_operation')
+        _require(current is not None, 'Chunk index operation removed')
+        identity = ('index_key', 'revision_hash', 'plan_hash', 'model', 'dimension',
+                    'preprocess_version', 'config_hash')
+        if previous['status'] == 'ready':
+            _require(current == previous, 'Ready chunk index is immutable')
+        elif previous['status'] == 'failed':
+            if current != previous:
+                _require(current['operation_id'] != previous['operation_id'],
+                         'Failed chunk index cannot be reopened')
+                _require(previous['operation_id'] in current['failed_operation_ids'],
+                         'Failed chunk index restart is not recorded')
+                _require(current['status'] in ('pending', 'embedding') and
+                         all(current[key] == previous[key] for key in identity),
+                         'Chunk index restart identity changed')
+        else:
+            _require(current['operation_id'] == previous['operation_id'],
+                     'Chunk index operation changed')
+            _require(current['status'] == previous['status'] or
+                     current['status'] in _CHUNK_ADVANCE[previous['status']],
+                     'Illegal chunk index transition')
+            _require(all(current[key] == previous[key] for key in identity + ('created_at',)) and
+                     current['failed_operation_ids'] == previous['failed_operation_ids'],
+                     'Chunk index identity changed')
+            _require(all(not value or current['usage'][key] for key, value in previous['usage'].items()),
+                     'Chunk index usage reversed')
+            if previous['chunk_manifest_hash'] is not None:
+                _require(current['chunk_manifest_hash'] == previous['chunk_manifest_hash'],
+                         'Chunk index manifest changed')
+    elif 'chunk_index_operation' in new:
+        created = new['chunk_index_operation']
+        _require(old['dispatch_closed'] and not old['integrity_blocked'] and
+                 old['plan_publication_status'] == 'published' and
+                 created['status'] in ('pending', 'embedding') and
+                 not any(created['usage'].values()) and not created['failed_operation_ids'] and
+                 created['error_code'] is None, 'Invalid initial chunk index operation')
     for field in _IDENTITIES:
         _require(old[field] == new[field], 'Immutable manifest identity changed')
     if old['plan'] is not None:
@@ -661,6 +895,45 @@ class RunManifestStore:
             except CASConflict:
                 continue
         raise StorageError('Manifest CAS retry budget exhausted')
+
+    def create_deep_review(self, owner, run_id, operation: dict):
+        incoming = deepcopy(operation)
+        created = False
+        def apply(m):
+            nonlocal created
+            existing = m.get('deep_review_operation')
+            if existing is not None:
+                _require(existing['revision_id'] == incoming['revision_id'],
+                         'Deep review revision conflict', SearchStateError)
+                created = False
+                return
+            _require('evidence_bundle_operation' in m and
+                     m['evidence_bundle_operation']['status'] in ('ready', 'partial'),
+                     'Retrieval bundle is not ready', SearchStateError)
+            m['deep_review_operation'] = incoming
+            created = True
+        result = self.update(owner, run_id, apply)
+        return result['deep_review_operation'], created
+
+    def complete_deep_review(self, owner, run_id, operation_id, status, *,
+                             report_key=None, report_hash=None, error_code=None):
+        _uuid(operation_id)
+        _require(status in _DEEP_REVIEW_TERMINALS, 'Invalid deep review terminal', SearchStateError)
+        if error_code is not None:
+            _require(type(error_code) is str and re.fullmatch(r'[A-Za-z0-9_]{1,128}', error_code),
+                     'Invalid deep review error')
+        def apply(m):
+            op = m.get('deep_review_operation')
+            _require(op is not None and op['operation_id'] == operation_id,
+                     'Deep review operation mismatch', SearchStateError)
+            if op['status'] in _DEEP_REVIEW_TERMINALS:
+                _require((op['status'], op['report_key'], op['report_hash'], op['error_code']) ==
+                         (status, report_key, report_hash, error_code),
+                         'Terminal deep review outcome differs')
+                return
+            op.update(status=status, report_key=report_key, report_hash=report_hash,
+                      error_code=error_code)
+        return self.update(owner, run_id, apply)
 
     def bind_plan(self, owner, run_id, plan_ref: dict):
         ref = deepcopy(plan_ref)

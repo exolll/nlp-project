@@ -39,6 +39,12 @@ def _bytes(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
+def search_fingerprint(query, *, per_page, sort=None, order=None, **extra):
+    """Identity of the effective GitHub search request. `page` is applied uniformly per pass."""
+    params = {'q': query, 'sort': sort, 'order': order, 'per_page': per_page, **extra}
+    return json.dumps(params, sort_keys=True)
+
+
 class SearchExecutor:
     def __init__(self, persistence, github, clock, settings=None, *, timer=monotonic, wait=sleep):
         self.persistence = persistence
@@ -62,6 +68,7 @@ class SearchExecutor:
             if manifest['run_status'] not in ('queued', 'running') or manifest['dispatch_closed']:
                 raise SearchStateError('Run cannot dispatch search')
             queries = []
+            unique = {}
             groups = sorted(plan.groups, key=lambda group: group.group_name)
             for group in groups:
                 if len(group.queries) > self.settings.github_search_max_queries_per_group:
@@ -70,8 +77,17 @@ class SearchExecutor:
                 for group in groups:
                     if index < len(group.queries):
                         query = group.queries[index]
-                        queries.append({'group_id': group.group_id, 'query_id': query.query_id,
-                                        'query': render_query(query)})
+                        rendered = render_query(query)
+                        identity = search_fingerprint(
+                            rendered, per_page=self.settings.github_search_per_page)
+                        alias = {'group_id': group.group_id, 'query_id': query.query_id}
+                        if identity in unique:
+                            unique[identity]['aliases'].append(alias)
+                        else:
+                            entry = {'group_id': group.group_id, 'query_id': query.query_id,
+                                     'query': rendered, 'aliases': [alias]}
+                            unique[identity] = entry
+                            queries.append(entry)
             budget = self.settings.model_dump()
             self.manifests.start(owner, run_id)
             started_at = _now()
@@ -245,16 +261,19 @@ class SearchExecutor:
                     self._stop(owner, run_id, 'CANDIDATE_BUDGET')
                     continue
                 self.persistence.repository.update_repository(repo_id, patch, issued)
-                hit = {'group_id': args['group_id'], 'query_id': args['query_id'], 'query': args['query'],
-                       'page': args['page'], 'position': position, 'request_id': request_id}
-                def merge(m):
-                    candidate = m['candidates'].setdefault(str(repo_id), {'hits': [], 'collection_status': 'not_selected'})
-                    if hit not in candidate['hits']:
-                        candidate['hits'].append(hit)
-                    if candidate.get('metadata_fetched_at', '') <= payload['issued_at']:
-                        candidate.setdefault('metadata', {}).update(deepcopy(patch))
-                        candidate['metadata_fetched_at'] = payload['issued_at']
-                self.manifests.update(owner, run_id, merge)
+                aliases = args.get('aliases') or [{'group_id': args['group_id'], 'query_id': args['query_id']}]
+                for alias in aliases:
+                    hit = {'group_id': alias['group_id'], 'query_id': alias['query_id'],
+                           'query': args['query'], 'page': args['page'], 'position': position,
+                           'request_id': request_id}
+                    def merge(m, hit=hit):
+                        candidate = m['candidates'].setdefault(str(repo_id), {'hits': [], 'collection_status': 'not_selected'})
+                        if hit not in candidate['hits']:
+                            candidate['hits'].append(hit)
+                        if candidate.get('metadata_fetched_at', '') <= payload['issued_at']:
+                            candidate.setdefault('metadata', {}).update(deepcopy(patch))
+                            candidate['metadata_fetched_at'] = payload['issued_at']
+                    self.manifests.update(owner, run_id, merge)
             if result['data']['incomplete_results']:
                 self._stop(owner, run_id, 'INCOMPLETE_RESULTS')
         elif kind == 'commit':

@@ -3,13 +3,14 @@ from copy import deepcopy
 import hashlib
 import json
 from unittest.mock import Mock
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from app.schemas.search import SearchIntegrityError
 from app.services.github_client import GitHubService, GitHubSettings
-from app.services.search_execution import SearchExecutionSettings, SearchExecutor
+from app.services.search_execution import SearchExecutionSettings, SearchExecutor, search_fingerprint
 from app.services.search_persistence import SearchPersistence
 from app.services.storage import StorageError
 from test_search_persistence import OWNER, context, publish
@@ -64,6 +65,52 @@ def happy_handler(request):
         return httpx.Response(200, json={'sha': COMMIT})
     assert request.url.params['ref'] == COMMIT
     return httpx.Response(200, json=readme())
+
+
+def test_search_fingerprint_covers_every_effective_parameter():
+    base = search_fingerprint('project tracker', per_page=5)
+    assert base == search_fingerprint('project tracker', per_page=5)
+    assert base != search_fingerprint('project tracker', per_page=5, sort='stars')
+    assert base != search_fingerprint('project tracker', per_page=5, order='desc')
+    assert base != search_fingerprint('project tracker', per_page=5, sort='stars', order='desc')
+    assert base != search_fingerprint('project tracker', per_page=10)
+    assert base != search_fingerprint('project tracker!', per_page=5)
+    assert base != search_fingerprint('project tracker', per_page=5, extra='x')
+
+
+def test_identical_effective_search_runs_once_and_keeps_every_alias(context):
+    service, storage, repository, revision, plan = context
+    repository.clients = []
+    repository.update_repository = Mock(return_value=True)
+    groups = []
+    base_query = next(group.queries[0] for group in plan.groups if group.queries)
+    for group in plan.groups:
+        if group.group_name in ('A', 'B'):
+            changes = {'group_status': 'ready', 'source_requirement_pointers': ['/project_topic'],
+                       'skip_reason': None}
+            if group.group_name == 'B':
+                changes['queries'] = [base_query.model_copy(update={'query_id': str(uuid4())})]
+            groups.append(group.model_copy(update=changes))
+        else:
+            groups.append(group.model_copy(update={'queries': []}))
+    custom = plan.model_copy(update={'groups': groups, 'plan_id': str(uuid4())})
+    service.publish_plan(OWNER, str(revision.task_id), revision, custom)
+    service.manifests.start(OWNER, custom.run_id)
+    searches = []
+    def handler(request):
+        if request.url.path == '/search/repositories':
+            searches.append(request.url.params.get('q'))
+        return happy_handler(request)
+    executor = runner((service, storage, repository, custom), handler)
+    executor.execute(OWNER, custom.run_id)
+    manifest = service.manifests.read(OWNER, custom.run_id)
+    assert len(searches) == 1, searches
+    assert len(manifest['search_execution']['queries']) == 1
+    aliases = manifest['search_execution']['queries'][0]['aliases']
+    assert {alias['group_id'] for alias in aliases} == {custom.groups[0].group_id, custom.groups[1].group_id}
+    hits = manifest['candidates']['1']['hits']
+    assert {hit['group_id'] for hit in hits} == {custom.groups[0].group_id, custom.groups[1].group_id}
+    assert len({hit['request_id'] for hit in hits}) == 1
 
 
 def test_search_to_snapshot_and_repeat_never_dispatches(execution):

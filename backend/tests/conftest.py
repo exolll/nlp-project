@@ -1,13 +1,18 @@
 """All tests are offline. Real model/network transports are forbidden, not stubbed in production."""
+import os
+
 import httpx
 import pytest
 
-from app.core.settings import ExtractionSettings, Settings
+from app.core.settings import ExtractionSettings, Settings, SiliconFlowSettings
 
 
 def pytest_configure():
     Settings.model_config['env_file'] = None
     ExtractionSettings.model_config['env_file'] = None
+    SiliconFlowSettings.model_config['env_file'] = None
+    os.environ['EMBEDDING_ENABLED'] = 'false'
+    os.environ.setdefault('SILICONFLOW_API_KEY', 'test-only')
 
 
 @pytest.fixture(autouse=True)

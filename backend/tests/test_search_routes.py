@@ -17,6 +17,7 @@ from app.persistence.input_state import InputState
 from app.services.candidate_review import EvidenceReview
 from app.services.deep_check import DEEP_CHECK_VERSION, DeepCheck, DeepCheckSettings
 from app.services.github_client import GitHubService, GitHubSettings
+from app.services.query_planner import PlannerError
 from app.services.search_execution import SearchExecutionSettings, SearchExecutor
 from app.services.search_persistence import SearchPersistence
 from app.services.storage import CASConflict, StorageError
@@ -43,6 +44,7 @@ def api(context):
         closes = 0
         unavailable = False
         skip = False
+        plan_error = None
         defer_evidence = False
         over_budget = False
         page_budget = False
@@ -71,7 +73,7 @@ def api(context):
             return external
 
         @contextmanager
-        def open(self, store, config, budget=None):
+        def open(self, store, config, budget=None, app_settings=None):
             self.opens += 1
             self.configs = config
             github = None
@@ -96,6 +98,8 @@ def api(context):
                     async def publish(identity, task_id, revision, run_id):
                         self.plans += 1
                         assert revision == confirmed
+                        if self.plan_error:
+                            raise PlannerError(self.plan_error)
                         if self.skip:
                             raise RuntimeError('unknown provider outcome')
                         document = plan.model_copy(update={'run_id': run_id, 'confirmed_revision_id': str(revision.revision_id)})
@@ -326,6 +330,15 @@ def test_task_cap_keeps_duplicate_available(api):
     assert response.status_code == 429 and response.json()['error_code'] == 'SEARCH_RUN_LIMIT'
     assert start(api, key=key).json()['run_id'] == first.json()['run_id']
     assert api.factory.plans == 3
+
+
+def test_planner_error_code_is_exposed(api):
+    api.factory.plan_error = 'PLANNER_QUERY_TOO_LONG'
+    rid = start(api).json()['run_id']
+    response = api.client.get(f'/api/v1/tasks/{api.tid}/search-runs/{rid}', headers=api.headers)
+    assert response.json()['pipeline_status'] == 'interrupted'
+    assert response.json()['pipeline_error_code'] == 'PLANNER_QUERY_TOO_LONG'
+    assert 'Traceback' not in response.text and 'secret' not in response.text.lower()
 
 
 def test_worker_failure_is_safe_and_preserves_manifest(api):

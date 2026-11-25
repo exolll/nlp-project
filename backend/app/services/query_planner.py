@@ -173,7 +173,7 @@ def _query_text(terms, technical):
         return ' '.join(sorted({term.text if _keyword(term.text) else '"' + term.text + '"'
                                 for term in terms}))
     tokens = [token for term in terms for token in term.text.split()]
-    _require(1 <= len(tokens) <= 4, 'PLANNER_QUERY_TOO_LONG')
+    _require(1 <= len(tokens) <= 8, 'PLANNER_QUERY_TOO_LONG')
     _require(all(_keyword(token) for token in tokens), 'PLANNER_UNSAFE_KEYWORD')
     return ' '.join(sorted(set(tokens)))
 

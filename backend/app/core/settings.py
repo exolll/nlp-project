@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     max_session_tasks: int = Field(100, gt=0)
     storage_backend: Literal['local', 's3'] = 'local'
     local_storage_directory: Path = PROJECT_ROOT / 'data' / 'objects'
+    chroma_path: Path = PROJECT_ROOT / 'data' / 'chroma'
     s3_endpoint_url: str | None = None
     s3_region: str = 'us-east-1'
     s3_bucket: str = ''
@@ -60,3 +61,41 @@ class ExtractionSettings(BaseSettings):
     deepseek_api_key: SecretStr = SecretStr('')
     deepseek_base_url: Literal['https://api.deepseek.com'] = 'https://api.deepseek.com'
     deepseek_model: Literal['deepseek-flash'] = 'deepseek-flash'
+
+
+class SiliconFlowSettings(BaseSettings):
+    """Embedding transport configuration; the key is never logged or echoed."""
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / '.env', extra='ignore', hide_input_in_errors=True)
+    siliconflow_api_key: SecretStr = SecretStr('')
+    siliconflow_base_url: str = 'https://api.siliconflow.cn/v1'
+    embedding_provider: Literal['siliconflow'] = 'siliconflow'
+    embedding_model: Literal['BAAI/bge-m3'] = 'BAAI/bge-m3'
+    embedding_dimension: int = Field(default=1024, ge=1, le=8192)
+    embedding_batch_size: int = Field(default=16, ge=1, le=32)
+    embedding_max_batches: int = Field(default=32, ge=1, le=128)
+    embedding_max_chunks_per_run: int = Field(default=512, ge=1, le=1000)
+    embedding_max_tokens_per_run: int = Field(default=262144, ge=1)
+    embedding_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    embedding_max_retries: int = Field(default=1, ge=0, le=2)
+    embedding_enabled: bool = True
+
+    @model_validator(mode='after')
+    def require_key_when_enabled(self):
+        if self.embedding_dimension != 1024:
+            raise ValueError('BAAI/bge-m3 的向量维度必须是 1024。')
+        if self.embedding_enabled and not self.siliconflow_api_key.get_secret_value().strip():
+            raise ValueError('缺少 SILICONFLOW_API_KEY：Embedding 已启用但未配置密钥。')
+        return self
+
+    def version(self):
+        return f'{self.embedding_model}-{self.embedding_dimension}-v1'
+
+
+def validate_embedding_config():
+    """Startup gate: fail clearly instead of failing on the first paid index call."""
+    try:
+        return SiliconFlowSettings()
+    except ValueError:
+        raise RuntimeError(
+            'Embedding 配置不完整：请设置 SILICONFLOW_API_KEY；'
+            '若只需调试输入，请显式设置 EMBEDDING_ENABLED=false。') from None

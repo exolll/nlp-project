@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
 
-from app.core.settings import Settings
+from app.core.settings import Settings, validate_embedding_config
 from app.persistence.input_state import APIError, InputState, fail, utcnow
 from app.schemas.documents import Contract, InputConfig, InputStatus, NormalizedDocument, SessionResponse, TaskList, TaskResponse
 from app.services.processing import process_document
@@ -57,6 +57,7 @@ class RequestBoundary:
 def create_app(settings=None, storage=None, *, extraction_settings=None, extraction_transport=None,
                search_backend_factory=None):
     settings = settings or Settings()
+    validate_embedding_config()
     app = FastAPI()
     app.state.processor = process_document
     app.state.storage = storage
@@ -246,6 +247,9 @@ def create_app(settings=None, storage=None, *, extraction_settings=None, extract
     install_routes(app, state, owner, settings, extraction_settings, extraction_transport)
     from app.services.search_routes import install_routes as install_search_routes
     install_search_routes(app, state, owner, settings, search_backend_factory)
+    from app.services.deep_review_routes import install_routes as install_deep_review_routes
+    install_deep_review_routes(app, state, owner, settings, extraction_settings,
+                               extraction_transport, search_backend_factory)
     return app
 
 

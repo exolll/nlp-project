@@ -14,6 +14,7 @@ from app.persistence.run_manifest import RunManifestStore
 from app.schemas.documents import Contract
 from app.schemas.requirements import RequirementRevision
 from app.schemas.search import SearchStateError
+from app.services.query_planner import PlannerError
 from app.services.requirements import revision_task
 
 
@@ -61,7 +62,7 @@ class BackendFactory:
         return database, provider, github
 
     @contextmanager
-    def open(self, store, config, budget=None):
+    def open(self, store, config, budget=None, app_settings=None):
         from app.persistence.search_database import create_search_engine
         from app.persistence.search_repository import SearchRepository
         from app.services.candidate_review import EvidenceReview
@@ -75,6 +76,23 @@ class BackendFactory:
                                       deep_check=DeepCheck(persistence, provider,
                                                            settings=DeepCheckSettings()))
             if budget is not None:
+                from app.core.settings import SiliconFlowSettings, Settings
+                from app.services.chunk_index import ChunkIndexer
+                from app.services.chroma_store import ChromaStore
+                from app.services.embedding_service import EmbeddingService
+                from app.services.evidence_bundle import EvidenceBundleService
+                from app.services.siliconflow_client import SiliconFlowClient
+                embedding = SiliconFlowSettings()
+                if embedding.embedding_enabled:
+                    service = EmbeddingService(SiliconFlowClient(embedding), store.storage, embedding)
+                    chroma = ChromaStore.persistent((app_settings or Settings()).chroma_path,
+                                                    model=embedding.embedding_model,
+                                                    dimension=embedding.embedding_dimension,
+                                                    version=embedding.version())
+                    backend.chunk_indexer = ChunkIndexer(persistence, service, embedding,
+                                                         chroma_factory=lambda: chroma)
+                    backend.evidence_bundle = EvidenceBundleService(persistence, backend.chunk_indexer,
+                                                                    embedding)
                 from app.services.github_client import GitHubService
                 from app.services.query_planner import QueryPlanner
                 from app.services.search_execution import SearchExecutionSettings, SearchExecutor
@@ -216,6 +234,35 @@ def evidence_view(report):
         'version', 'task_id', 'run_id', 'confirmed_revision_id', 'warning', 'requirement_items', 'candidates')}
 
 
+def retrieval_view(bundle, repository_id=None, requirement_item_id=None):
+    data = {key: deepcopy(bundle[key]) for key in (
+        'version', 'task_id', 'run_id', 'confirmed_revision_id', 'status', 'warning',
+        'created_at', 'model', 'dimension', 'config', 'empty_reason')}
+    data['schema_version'] = bundle.get('schema_version', 1)
+    data['query_usage'] = deepcopy(bundle.get('query_usage'))
+    requirements = deepcopy(bundle['requirements'])
+    candidates = deepcopy(bundle['candidates'])
+    if requirement_item_id is not None:
+        wanted = str(requirement_item_id)
+        if not any(row['requirement_item_id'] == wanted for row in requirements):
+            fail(404, 'RETRIEVAL_FILTER_NOT_FOUND', '该需求条目不在本次运行中。')
+        requirements = [row for row in requirements if row['requirement_item_id'] == wanted]
+        candidates = [{**row, 'items': [item for item in row['items']
+                                        if item['requirement_item_id'] == wanted]}
+                      for row in candidates]
+    if repository_id is not None:
+        if not any(row['repository_id'] == str(repository_id) for row in candidates):
+            fail(404, 'RETRIEVAL_FILTER_NOT_FOUND', '该仓库不在本次运行中。')
+        candidates = [row for row in candidates if row['repository_id'] == str(repository_id)]
+    data['requirements'] = requirements
+    data['candidates'] = candidates
+    data['filters'] = {'repository_id': None if repository_id is None else str(repository_id),
+                       'requirement_item_id': None if requirement_item_id is None else str(requirement_item_id)}
+    data['notice'] = ('以下为已保存 README 中召回的候选片段；相关性尚未核查，不代表功能已满足；'
+                      '相似度距离与 RRF 排名不构成满足百分比。')
+    return data
+
+
 def run_view(record, manifest=None):
     result = {key: record[key] for key in ('run_id', 'task_id', 'confirmed_revision_id', 'status')}
     result['retryable'] = False
@@ -235,8 +282,12 @@ def run_view(record, manifest=None):
             if op['operation_status'] in ('interrupted', 'integrity_failed')]
 
         result.update(status=manifest['run_status'], plan_status=manifest['plan_publication_status'],
-                      dispatch_closed=manifest['dispatch_closed'],
-                      evidence_status='published' if manifest.get('evidence_operation', {}).get('published') else 'not_ready')
+                      dispatch_closed=manifest['dispatch_closed'])
+        result['evidence_status'] = 'published' if manifest.get('evidence_operation', {}).get('published') else 'not_ready'
+        retrieval = manifest.get('evidence_bundle_operation')
+        result['retrieval_status'] = retrieval['status'] if retrieval else 'not_started'
+        result['retrieval_error_code'] = (retrieval.get('error_code')
+                                          if retrieval and retrieval['status'] == 'failed' else None)
         screening = manifest.get('candidate_screening')
         result['screening'] = ({key: deepcopy(screening[key]) for key in ('version', 'warning', 'candidates')}
                                if screening else None)
@@ -299,7 +350,7 @@ def install_routes(app, state, owner, settings, factory=None):
 
         try:
             outcome('running')
-            with factory.open(store, configuration, budget) as backend:
+            with factory.open(store, configuration, budget, settings) as backend:
                 p = backend.persistence
                 p.create_run(identity, record['task_id'], confirmed, record['run_id'])
                 plan = anyio.run(backend.planner.plan_and_publish, identity, record['task_id'], confirmed, record['run_id'])
@@ -311,7 +362,22 @@ def install_routes(app, state, owner, settings, factory=None):
                 executor.execute(identity, record['run_id'], confirmed_revision=confirmed)
                 if stable(p.manifests.read(identity, record['run_id'])):
                     backend.review.review(identity, record['task_id'], record['run_id'], confirmed)
+                    if getattr(backend, 'chunk_indexer', None) is not None:
+                        # Retrieval is additive: failures are recorded, never roll back published evidence.
+                        try:
+                            backend.chunk_indexer.index(identity, record['task_id'], record['run_id'], confirmed)
+                        except Exception:
+                            pass
+                        try:
+                            backend.evidence_bundle.publish(identity, record['task_id'], record['run_id'], confirmed)
+                        except Exception:
+                            pass
             outcome('completed')
+        except PlannerError as exc:
+            try:
+                outcome('interrupted', exc.code)
+            except Exception:
+                pass
         except Exception:
             # No replay, even if this separate annotation has an unknown write outcome.
             try:
@@ -407,6 +473,31 @@ def install_routes(app, state, owner, settings, factory=None):
             fail(409, 'EVIDENCE_NOT_READY', '证据状态尚未就绪。')
         except Exception:
             fail(503, 'EVIDENCE_UNAVAILABLE', '证据读取结果未确认；不会发起外部请求。')
+
+    @app.get('/api/v1/tasks/{task_id}/search-runs/{run_id}/retrieval-evidence')
+    def get_retrieval_evidence(task_id: UUID, run_id: UUID, request: Request,
+                               repository_id: str | None = None,
+                               requirement_item_id: UUID | None = None):
+        from app.schemas.search import SearchIntegrityError
+        from app.services.evidence_bundle import EvidenceBundleError, EvidenceBundleStore
+
+        store, identity = state(), owner(request)
+        record, confirmed = authorized(store, identity, task_id, run_id)
+        manifest = manifest_for(store, identity, record)
+        operation = (manifest or {}).get('evidence_bundle_operation')
+        if operation is None:
+            fail(409, 'RETRIEVAL_NOT_READY', '检索证据尚未生成，请稍后查询状态。')
+        if operation['status'] == 'failed':
+            fail(409, 'RETRIEVAL_FAILED', '检索证据生成失败；已保存的搜索与深度核对结果仍可查看。')
+        try:
+            bundle, _ = EvidenceBundleStore(store.storage).read(identity, str(run_id), confirmed)
+        except EvidenceBundleError:
+            fail(409, 'RETRIEVAL_NOT_READY', '检索证据尚未就绪。')
+        except SearchIntegrityError:
+            fail(409, 'RETRIEVAL_INTEGRITY', '检索证据完整性校验失败。')
+        except SearchStateError:
+            fail(409, 'RETRIEVAL_NOT_READY', '检索证据尚未就绪。')
+        return retrieval_view(bundle, repository_id, requirement_item_id)
 
     @app.post('/api/v1/tasks/{task_id}/search-runs/{run_id}/evidence')
     def review(task_id: UUID, run_id: UUID, body: Contract, request: Request):

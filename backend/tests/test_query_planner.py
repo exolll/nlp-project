@@ -3,6 +3,7 @@ import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -206,8 +207,8 @@ def test_unquoted_keywords_cannot_inject_search_syntax(h, text):
 
 @pytest.mark.parametrize('terms,code', [
     (['audio', 'transcription', 'timestamps'], 'PLANNER_INVALID_DRAFT'),
-    (['upload audio file web interface'], 'PLANNER_QUERY_TOO_LONG'),
-    (['download transcript', 'text file export'], 'PLANNER_QUERY_TOO_LONG'),
+    (['one two three four five six seven eight nine'], 'PLANNER_QUERY_TOO_LONG'),
+    (['download transcript', 'one two three four five six seven'], 'PLANNER_QUERY_TOO_LONG'),
 ])
 def test_query_concept_and_keyword_bounds(h, terms, code):
     h.body['groups'][0]['queries'][0]['terms'] = [
@@ -216,6 +217,39 @@ def test_query_concept_and_keyword_bounds(h, terms, code):
         h.run()
     assert h.manifest()['plan'] is None
     assert h.calls == 1
+
+
+@pytest.mark.parametrize('words,ok', [(0, False), (1, True), (4, True),
+                                      (5, True), (8, True), (9, False)])
+def test_query_keyword_boundary(words, ok):
+    from app.services.query_planner import _query_text
+    text = ' '.join(f'w{index}' for index in range(words))
+    terms = [SimpleNamespace(text=text)]
+    if ok:
+        assert _query_text(terms, False) == ' '.join(sorted({f'w{index}' for index in range(words)}))
+    else:
+        with pytest.raises(PlannerError, match='PLANNER_QUERY_TOO_LONG'):
+            _query_text(terms, False)
+
+
+def test_first_real_run_draft_queries_compile(h):
+    h.body['groups'][0].update(
+        status='ready', sources=['/project_topic'], skip_reason=None,
+        queries=[{'terms': [{'text': text, 'source': '/project_topic'}],
+                  'language_filter': None, 'qualifiers': {}}
+                 for text in ('audio transcription timestamps', 'audio recordings transcripts')])
+    h.body['groups'][1].update(
+        status='ready', sources=['/required_features/0'], skip_reason=None,
+        queries=[{'terms': [{'text': text, 'source': '/required_features/0'}],
+                  'language_filter': None, 'qualifiers': {}}
+                 for text in ('audio file upload web interface', 'transcript timestamps segments',
+                              'transcript text file export')])
+    plan = h.run()
+    assert h.calls == 1
+    assert sorted(query.query_text for group in plan.groups for query in group.queries) == sorted([
+        'audio timestamps transcription', 'audio recordings transcripts',
+        'audio file interface upload web', 'segments timestamps transcript',
+        'export file text transcript'])
 
 
 def test_keywords_are_unquoted_deduplicated_and_hashed(h):
