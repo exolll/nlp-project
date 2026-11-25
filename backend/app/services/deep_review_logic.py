@@ -1,19 +1,40 @@
 """Deterministic 3b logic: byte-accurate citations, coverage, truth tables, budgets."""
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.requirements import UUIDString
-from app.services.deep_review_models import (Citation, RejectedCitation, ReasonCode,
-                                             LogicGroupResult, MAX_CHUNKS_PER_REPOSITORY,
-                                             MAX_INPUT_BYTES, MAX_OUTPUT_TOKENS,
-                                             RANKING_CONFIG_VERSION, ExcludedRepository,
-                                             HardConstraintUnit, PreferredRankingSummary,
-                                             RecommendationReason, RecommendationResult,
-                                             RankingResults, RepositoryRanking)
+from app.services.deep_review_models import (Citation, EvidenceCoverage, RejectedCitation,
+                                             ReasonCode, LogicGroupResult,
+                                             MAX_CHUNKS_PER_REPOSITORY, MAX_INPUT_BYTES,
+                                             MAX_OUTPUT_TOKENS, RANKING_CONFIG_VERSION,
+                                             ExcludedRepository, HardConstraintUnit,
+                                             PreferredRankingSummary, RecommendationReason,
+                                             RecommendationResult, RankingResults,
+                                             RepositoryRanking, ScoreDimension)
 
 MAX_REPOSITORIES = 5
 MAX_CITATIONS = 2
+SCORE_DIMENSIONS = (
+    ('required_features', 'Required Feature Match', 0.35),
+    ('topic', 'Topic Match', 0.15),
+    ('technology', 'Technology Match', 0.15),
+    ('language', 'Programming Language Match', 0.10),
+    ('project_type', 'Project Type Match', 0.10),
+    ('preferred', 'Preferred Match', 0.10),
+    ('activity', 'Activity / Popularity', 0.05),
+)
+SCORE_WEIGHTS = {key: weight for key, _label, weight in SCORE_DIMENSIONS}
+FIELD_DIMENSIONS = {
+    'project_topic': 'topic', 'domain': 'topic', 'project_description': 'topic',
+    'required_features': 'required_features', 'required_technologies': 'technology',
+    'programming_languages': 'language', 'project_type': 'project_type',
+    'preferred_features': 'preferred', 'preferred_technologies': 'preferred',
+}
+ACTIVITY_STAR_CAP = 1000
+ACTIVITY_FORK_CAP = 200
+ACTIVITY_FRESH_DAYS = 365
 
 
 class DeepReviewInputError(ValueError):
@@ -328,8 +349,13 @@ def _hard_constraint_units(repository):
                  and result.operator == members[0].operator
                  and len({member.modality for member in members}) == 1)
         expected = _group_result(members[0].operator, members, chunk_ids)
-        value = expected if valid and result.result == expected else (
-            'fail' if expected == 'fail' else 'unknown')
+        verified = valid and result.result == expected
+        # An unreadable group is unknown, never an automatic conflict. A prohibited
+        # member with its own valid counter-evidence still conflicts on its own merit.
+        prohibited_fail = any(member.modality == 'prohibited'
+                              and _hard_result(member, chunk_ids) == 'fail'
+                              for member in members)
+        value = expected if verified else ('fail' if prohibited_fail else 'unknown')
         units.append(HardConstraintUnit(
             kind='logic_group', source_id=group_id,
             member_item_ids=sorted(member_ids), result=value))
@@ -451,8 +477,158 @@ def _metadata_string(metadata, *keys):
     return None
 
 
-def build_ranking_results(repositories, metadata_by_id=None):
+def _metadata_int(metadata, *keys):
+    for key in keys:
+        value = metadata.get(key)
+        if type(value) is int and value >= 0:
+            return value
+    return None
+
+
+def _as_utc(value):
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _activity_dimension(metadata, as_of):
+    stars = _metadata_int(metadata, 'stars', 'stargazers_count')
+    forks = _metadata_int(metadata, 'forks', 'forks_count')
+    pushed = _as_utc(metadata.get('pushed_at') or metadata.get('updated_at'))
+    age_days = None if pushed is None else max(0, (as_of - pushed).days)
+    components = []
+    if stars is not None:
+        components.append((0.4, 100 * min(stars, ACTIVITY_STAR_CAP) / ACTIVITY_STAR_CAP))
+    if forks is not None:
+        components.append((0.3, 100 * min(forks, ACTIVITY_FORK_CAP) / ACTIVITY_FORK_CAP))
+    if age_days is not None:
+        components.append((0.3, max(0.0, 1 - age_days / ACTIVITY_FRESH_DAYS) * 100))
+    missing = len(components) < 3
+    detail = (f"stars={stars if stars is not None else 'missing'} (cap {ACTIVITY_STAR_CAP}); "
+              f"forks={forks if forks is not None else 'missing'} (cap {ACTIVITY_FORK_CAP}); "
+              f"pushed_at={pushed.date().isoformat() if pushed else 'missing'}; "
+              f"age_days={age_days if age_days is not None else 'missing'}; "
+              f"valid_components={len(components)}; reference_date={as_of.date().isoformat()}")
+    if not components:
+        return ScoreDimension(
+            key='activity', label='Activity / Popularity', weight=SCORE_WEIGHTS['activity'],
+            applicable=False, score=None, units_total=0, supports=0, contradicts=0,
+            insufficient=0, missing_data=True, detail=detail)
+    weight_total = sum(weight for weight, _score in components)
+    score = min(100.0, max(0.0, sum(weight * value for weight, value in components) / weight_total))
+    return ScoreDimension(
+        key='activity', label='Activity / Popularity', weight=SCORE_WEIGHTS['activity'],
+        applicable=True, score=score, units_total=0, supports=0, contradicts=0,
+        insufficient=0, missing_data=missing, detail=detail)
+
+
+def _group_dimension(members):
+    dimensions = {FIELD_DIMENSIONS.get(member.field) for member in members
+                  if member.modality != 'prohibited'}
+    dimensions.discard(None)
+    return dimensions.pop() if len(dimensions) == 1 else 'required_features'
+
+
+def _score_units(repository):
+    """One unit per hard constraint (groups counted once) plus preferred/informational items."""
+    reviews = {str(review.requirement_item_id): review for review in repository.requirements}
+    hard_units = _hard_constraint_units(repository)
+    units, grouped = [], set()
+    for unit in hard_units:
+        # Every hard-constraint member is settled here, even when the unit is
+        # unscorable; the fallback loop below must never count it again.
+        grouped.update(unit.member_item_ids)
+        if unit.kind == 'prohibited':
+            continue
+        members = [reviews[item_id] for item_id in unit.member_item_ids if item_id in reviews]
+        dimension = None if (
+            not members or any(member.modality == 'prohibited' for member in members)
+        ) else _group_dimension(members)
+        if dimension is None:
+            # Mixed or unmapped groups still count as one unresolved evidence unit,
+            # so skipping scoring never inflates the total or coverage.
+            units.append({'dimension': None, 'result': 'insufficient'})
+            continue
+        units.append({'dimension': dimension,
+                      'result': {'pass': 'supports', 'fail': 'contradicts',
+                                 'unknown': 'insufficient'}[unit.result]})
+    for review in repository.requirements:
+        item_id = str(review.requirement_item_id)
+        if item_id in grouped or review.modality == 'prohibited':
+            continue
+        dimension = ('preferred' if review.modality == 'preferred'
+                     else FIELD_DIMENSIONS.get(review.field))
+        if dimension is None:
+            continue
+        units.append({'dimension': dimension, 'result': review.verdict})
+    return units
+
+
+def _dimension_score(key, label, weight, units):
+    rows = [unit for unit in units if unit['dimension'] == key]
+    supports = sum(unit['result'] == 'supports' for unit in rows)
+    contradicts = sum(unit['result'] == 'contradicts' for unit in rows)
+    insufficient = sum(unit['result'] == 'insufficient' for unit in rows)
+    applicable = bool(rows)
+    return ScoreDimension(
+        key=key, label=label, weight=weight, applicable=applicable,
+        score=(100 * supports / len(rows)) if rows else None,
+        units_total=len(rows), supports=supports, contradicts=contradicts,
+        insufficient=insufficient)
+
+
+def _ranking_explanation(tier, total_score, coverage, dimensions):
+    strengths = [row.label for row in dimensions
+                 if row.applicable and row.score is not None and row.score >= 75]
+    gaps = [row.label for row in dimensions if row.applicable and row.insufficient > 0]
+    not_applicable = [row.label for row in dimensions if not row.applicable]
+    parts = [f'硬约束 {tier}', f'综合得分 {total_score:.1f}/100',
+             f'证据覆盖率 {coverage * 100:.0f}%']
+    if strengths:
+        parts.append('优势：' + '、'.join(strengths))
+    if gaps:
+        parts.append('证据不足：' + '、'.join(gaps))
+    if not_applicable:
+        parts.append('不适用：' + '、'.join(not_applicable))
+    return '；'.join(parts)
+
+
+def _score_repository(repository, metadata, as_of, tier):
+    units = _score_units(repository)
+    dimensions = []
+    for key, label, weight in SCORE_DIMENSIONS:
+        if key == 'activity':
+            dimensions.append(_activity_dimension(metadata, as_of))
+        else:
+            dimensions.append(_dimension_score(key, label, weight, units))
+    applicable = [row for row in dimensions if row.applicable]
+    weight_total = sum(row.weight for row in applicable)
+    total = (min(100.0, max(0.0, sum(row.weight * row.score for row in applicable) / weight_total))
+             if weight_total else 0.0)
+    supported = sum(unit['result'] == 'supports' for unit in units)
+    contradicted = sum(unit['result'] == 'contradicts' for unit in units)
+    insufficient = sum(unit['result'] == 'insufficient' for unit in units)
+    coverage = (supported + contradicted) / len(units) if units else 0.0
+    return total, dimensions, EvidenceCoverage(
+        applicable_units=len(units), supported=supported, contradicted=contradicted,
+        insufficient=insufficient, coverage=coverage,
+        not_applicable_dimensions=[row.label for row in dimensions if not row.applicable],
+    ), _ranking_explanation(tier, total, coverage, dimensions)
+
+
+def _ranking_sort_key(tier, total_score, coverage, repository_id):
+    return (_TIER_ORDER[tier], -total_score, -coverage, str(repository_id))
+
+
+def build_ranking_results(repositories, metadata_by_id=None, *, as_of=None):
     metadata_by_id = metadata_by_id or {}
+    reference = _as_utc(as_of) or datetime.now(timezone.utc)
     entries, excluded = [], []
     for repository in repositories:
         repository_id = str(repository.repository_id)
@@ -469,22 +645,30 @@ def build_ranking_results(repositories, metadata_by_id=None):
         tier = _hard_constraint_tier(repository, units)
         preferred = _preferred_summary(repository)
         metadata = metadata_by_id.get(repository_id) or {}
+        total, breakdown, coverage, explanation = _score_repository(
+            repository, metadata, reference, tier)
         entries.append({
             'repository': repository, 'units': units, 'tier': tier, 'preferred': preferred,
             'recommendation': _recommendation(repository, tier, units),
             'full_name': _metadata_string(metadata, 'full_name', 'name'),
             'html_url': _metadata_string(metadata, 'html_url'),
+            'total': total, 'breakdown': breakdown, 'coverage': coverage,
+            'explanation': explanation,
         })
-    entries.sort(key=lambda entry: (
-        _TIER_ORDER[entry['tier']], -entry['preferred'].evidence_match_count,
-        str(entry['repository'].repository_id)))
+    entries.sort(key=lambda entry: _ranking_sort_key(
+        entry['tier'], entry['total'], entry['coverage'].coverage,
+        entry['repository'].repository_id))
     ranked = [RepositoryRanking(
         repository_id=str(entry['repository'].repository_id), full_name=entry['full_name'],
         html_url=entry['html_url'], rank=index, hard_constraint_tier=entry['tier'],
         hard_constraint_units=entry['units'], preferred=entry['preferred'],
-        recommendation=entry['recommendation']) for index, entry in enumerate(entries, 1)]
+        recommendation=entry['recommendation'], total_score=entry['total'],
+        score_breakdown=entry['breakdown'], evidence_coverage=entry['coverage'],
+        ranking_tier=entry['tier'], ranking_explanation=entry['explanation'])
+        for index, entry in enumerate(entries, 1)]
     excluded.sort(key=lambda row: row.repository_id)
     return RankingResults(ranking_config_version=RANKING_CONFIG_VERSION,
+                          scored_at=reference.isoformat(),
                           repositories=ranked, excluded_repositories=excluded)
 
 

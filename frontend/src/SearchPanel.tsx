@@ -302,7 +302,9 @@ function RankingView({ ranking, repositories }: { ranking: NonNullable<ReviewRep
   }
   return <section className="ranking-view" aria-labelledby="ranking-title">
     <h4 id="ranking-title">推荐排名（确定性规则）</h4>
-    <p className="warning">先比较硬约束层级，再比较同层 preferred 有效证据数量；同分按仓库 ID 升序。不是总分、百分比或实时 Stars 排名。</p>
+    <p className="warning">{ranking.ranking_config_version === 'hard-tier-score-v2'
+      ? '先比较硬约束层级，再比较同层综合得分与证据覆盖率，最后按仓库 ID 升序。分数不能覆盖硬约束层级。'
+      : '先比较硬约束层级，再比较同层 preferred 有效证据数量；同分按仓库 ID 升序。'}</p>
     <p className="muted">规则版本：{ranking.ranking_config_version}。偏好项“有效证据”必须同时满足 supports 且带已校验引用。</p>
     {ranking.repositories.length === 0 && <p className="muted">没有可参与排名的已完成仓库。</p>}
     {ranking.repositories.map(repository => <article className="ranking-item" key={repository.repository_id}>
@@ -310,6 +312,20 @@ function RankingView({ ranking, repositories }: { ranking: NonNullable<ReviewRep
         ? <a href={repository.html_url} target="_blank" rel="noreferrer">{repository.full_name ?? repository.repository_id}</a>
         : repository.full_name ?? repository.repository_id} · <span className={`ranking-tier ${repository.hard_constraint_tier}`}>{tierLabels[repository.hard_constraint_tier]}</span></h5>
       <p className="muted">仓库 ID：{repository.repository_id} · 推荐状态：{recommendationLabels[repository.recommendation.status]}</p>
+      {repository.total_score != null && <div className="ranking-score">
+        <strong>{repository.total_score.toFixed(2)}</strong><span> / 100</span>
+        {repository.evidence_coverage && <span className="muted"> · 证据覆盖率 {(repository.evidence_coverage.coverage * 100).toFixed(0)}%</span>}
+      </div>}
+      {repository.ranking_explanation && <p className="muted">{repository.ranking_explanation}</p>}
+      {repository.score_breakdown && repository.score_breakdown.length > 0 && <table className="ranking-breakdown">
+        <thead><tr><th>维度</th><th>权重</th><th>得分</th><th>支持 / 反证 / 不足</th></tr></thead>
+        <tbody>{repository.score_breakdown.map(dimension => <tr key={dimension.key}>
+          <td>{dimension.label}{dimension.missing_data ? '（元数据缺失）' : ''}</td>
+          <td>{(dimension.weight * 100).toFixed(0)}%</td>
+          <td>{dimension.applicable ? `${(dimension.score ?? 0).toFixed(2)}` : 'N/A'}</td>
+          <td>{dimension.applicable ? `${dimension.supports} / ${dimension.contradicts} / ${dimension.insufficient}` : '—'}</td>
+        </tr>)}</tbody>
+      </table>}
       <p>{repository.preferred.applicable
         ? `偏好需求：${preferredLabels[repository.preferred.status ?? 'insufficient']} · 有效证据 ${repository.preferred.evidence_match_count} / ${repository.preferred.supports_count + repository.preferred.contradicts_count + repository.preferred.insufficient_count} · 支持 ${repository.preferred.supports_count} · 反证 ${repository.preferred.contradicts_count} · 不足 ${repository.preferred.insufficient_count}`
         : '偏好需求：不适用（没有 preferred 需求，不是证据不足）'}</p>

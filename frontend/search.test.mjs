@@ -337,6 +337,54 @@ test('ranking UI shows three tiers, preferred mixed/null, scoped citations, limi
   assert.doesNotMatch(html, /满足率|综合得分|%/)
 })
 
+test('scored ranking validates sort key and renders 100-point breakdown', async () => {
+  const weights = { required_features: .35, topic: .15, technology: .15, language: .1, project_type: .1, preferred: .1, activity: .05 }
+  const labels = { required_features: 'Required Feature Match', topic: 'Topic Match', technology: 'Technology Match',
+    language: 'Programming Language Match', project_type: 'Project Type Match', preferred: 'Preferred Match', activity: 'Activity / Popularity' }
+  const scored = () => {
+    const copy = structuredClone(ranking)
+    copy.ranking_config_version = 'hard-tier-score-v2'
+    copy.scored_at = '2026-11-25T00:00:00+00:00'
+    copy.repositories.forEach((row, index) => {
+      row.total_score = 90 - index * 20
+      row.ranking_tier = row.hard_constraint_tier
+      row.ranking_explanation = `综合得分 ${row.total_score}/100`
+      row.evidence_coverage = { applicable_units: 1, supported: 1, contradicted: 0, insufficient: 0, coverage: 1, not_applicable_dimensions: [] }
+      row.score_breakdown = Object.entries(weights).map(([key, weight]) => ({
+        key, label: labels[key], weight, applicable: true, score: key === 'activity' ? 50 : 80,
+        units_total: key === 'activity' ? 0 : 1, supports: key === 'activity' ? 0 : 1,
+        contradicts: 0, insufficient: 0, missing_data: false, detail: null }))
+    })
+    return copy
+  }
+  const signal = new AbortController().signal
+  const published = value => ({ ...reviewOperation, status: 'partial', persisted_status: 'partial',
+    report: { ...reviewReport, ranking: value }, report_key: 'report.json', report_hash: 'hash' })
+  const accepted = await readDeepReview(async () => published(scored()), 'task', 'revision', 'run', signal)
+  assert.equal(accepted.report.ranking.ranking_config_version, 'hard-tier-score-v2')
+  const wrongOrder = scored()
+  wrongOrder.repositories[0].hard_constraint_tier = 'needs_review'
+  wrongOrder.repositories[0].ranking_tier = 'needs_review'
+  wrongOrder.repositories[0].recommendation.status = 'needs_review'
+  wrongOrder.repositories[0].total_score = 10
+  await assert.rejects(readDeepReview(async () => published(wrongOrder), 'task', 'revision', 'run', signal), /排名格式或引用归属无效/)
+
+  let source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
+  source = source.replace("from './search'", `from '${searchUrl}'`).replace("from './api'", `from '${compile('export class Failure extends Error {} export function request() {}')}'`)
+  let compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
+  for (const name of ['react/jsx-runtime', 'react']) compiled = compiled.replaceAll(`from "${name}"`, `from '${pathToFileURL(require.resolve(name)).href}'`).replaceAll(`from '${name}'`, `from '${pathToFileURL(require.resolve(name)).href}'`)
+  const View = (await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)).DeepReviewReportView
+  const html = renderToStaticMarkup(React.createElement(View, { report: { ...reviewReport, ranking: scored() } }))
+  for (const text of ['90.00', '证据覆盖率 100%', 'Required Feature Match', 'Activity / Popularity', '硬约束层级']) assert.ok(html.includes(text), text)
+  assert.ok(html.includes('80.00'))
+  const missingActivity = scored()
+  const activity = missingActivity.repositories[0].score_breakdown.find(item => item.key === 'activity')
+  Object.assign(activity, { applicable: false, score: null, missing_data: true })
+  const missingHtml = renderToStaticMarkup(React.createElement(View, { report: { ...reviewReport, ranking: missingActivity } }))
+  assert.ok(missingHtml.includes('N/A'))
+  assert.ok(missingHtml.includes('Activity / Popularity（元数据缺失）'))
+})
+
 test('actual deep-review POST sends owner auth and consent but no Idempotency-Key', async () => {
   const apiSource = (await readFile(new URL('./src/api.ts', import.meta.url), 'utf8')).replaceAll('import.meta.env', '({ VITE_API_BASE_URL: undefined })')
   const api = await import(compile(apiSource))

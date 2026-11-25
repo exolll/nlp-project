@@ -161,6 +161,17 @@ export interface HardConstraintUnit {
 export interface RecommendationReason {
   reason_code: string; requirement_item_id: string | null; text: string; citations: DeepReviewCitation[]
 }
+export type ScoreDimensionKey = 'required_features' | 'topic' | 'technology' | 'language'
+  | 'project_type' | 'preferred' | 'activity'
+export interface ScoreDimension {
+  key: ScoreDimensionKey; label: string; weight: number; applicable: boolean
+  score: number | null; units_total: number; supports: number; contradicts: number
+  insufficient: number; missing_data: boolean; detail: string | null
+}
+export interface EvidenceCoverage {
+  applicable_units: number; supported: number; contradicted: number; insufficient: number
+  coverage: number; not_applicable_dimensions: string[]
+}
 export interface RepositoryRanking {
   repository_id: string; full_name: string | null; html_url: string | null; rank: number
   hard_constraint_tier: HardConstraintTier; hard_constraint_units: HardConstraintUnit[]
@@ -168,9 +179,14 @@ export interface RepositoryRanking {
     insufficient_count: number; evidence_match_count: number }
   recommendation: { status: 'recommended' | 'needs_review' | 'not_recommended'; reason_code: string
     reasons: RecommendationReason[]; limitations: string[] }
+  total_score?: number | null; score_breakdown?: ScoreDimension[]
+  evidence_coverage?: EvidenceCoverage | null; ranking_tier?: HardConstraintTier | null
+  ranking_explanation?: string | null
 }
 export interface RankingResults {
-  ranking_config_version: 'hard-tier-preferred-v1'; repositories: RepositoryRanking[]
+  ranking_config_version: 'hard-tier-preferred-v1' | 'hard-tier-score-v2'
+  scored_at?: string | null
+  repositories: RepositoryRanking[]
   excluded_repositories: { repository_id: string; status: string; error_code: string | null; reason_code: string }[]
 }
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -201,9 +217,31 @@ const isPreferredSummary = (value: unknown): value is RepositoryRanking['preferr
   return value.status === expected && value.evidence_match_count <= value.supports_count
 }
 const rankingTierOrder: Record<HardConstraintTier, number> = { meets_requirements: 0, needs_review: 1, hard_conflict: 2 }
+const scoreKeys = ['required_features', 'topic', 'technology', 'language', 'project_type', 'preferred', 'activity'] as const
+const isScoreDimension = (value: unknown): value is ScoreDimension => {
+  if (!isRecord(value) || !isOneOf(value.key, scoreKeys) || !isText(value.label)
+      || typeof value.weight !== 'number' || value.weight < 0 || value.weight > 1
+      || typeof value.applicable !== 'boolean' || !isCount(value.units_total)
+      || !isCount(value.supports) || !isCount(value.contradicts) || !isCount(value.insufficient)
+      || typeof value.missing_data !== 'boolean' || !isOptionalText(value.detail)) return false
+  if (value.units_total !== value.supports + value.contradicts + value.insufficient) return false
+  if (value.applicable !== (typeof value.score === 'number')) return false
+  return !value.applicable || (value.score as number) >= 0 && (value.score as number) <= 100
+}
+const isCoverage = (value: unknown): value is EvidenceCoverage => {
+  if (!isRecord(value) || !isCount(value.applicable_units) || !isCount(value.supported)
+      || !isCount(value.contradicted) || !isCount(value.insufficient)
+      || typeof value.coverage !== 'number' || value.coverage < 0 || value.coverage > 1
+      || !isTextList(value.not_applicable_dimensions)) return false
+  if (value.applicable_units !== value.supported + value.contradicted + value.insufficient) return false
+  const expected = value.applicable_units === 0 ? 0 : (value.supported + value.contradicted) / value.applicable_units
+  return Math.abs(value.coverage - expected) <= 1e-9
+}
 const isRanking = (value: unknown, repositories: DeepReviewRepository[]): value is RankingResults => {
-  if (!isRecord(value) || value.ranking_config_version !== 'hard-tier-preferred-v1'
+  if (!isRecord(value) || !isOneOf(value.ranking_config_version,
+    ['hard-tier-preferred-v1', 'hard-tier-score-v2'] as const)
       || !Array.isArray(value.repositories) || !Array.isArray(value.excluded_repositories)) return false
+  const scoredRanking = value.ranking_config_version === 'hard-tier-score-v2'
   const sourceById = new Map<string, DeepReviewRepository>()
   for (const source of repositories) {
     if (!isRecord(source) || !isText(source.repository_id) || sourceById.has(source.repository_id)
@@ -256,12 +294,30 @@ const isRanking = (value: unknown, repositories: DeepReviewRepository[]): value 
         || (row.hard_constraint_tier === 'meets_requirements'
           && (!row.hard_constraint_units.length || hasUnknown || source.coverage !== 'full'))
         || (!row.hard_constraint_units.length && row.hard_constraint_tier !== 'needs_review')) return false
+    if (scoredRanking) {
+      if (typeof row.total_score !== 'number' || row.total_score < 0 || row.total_score > 100
+          || row.ranking_tier !== row.hard_constraint_tier || !isText(row.ranking_explanation)
+          || !isCoverage(row.evidence_coverage) || !Array.isArray(row.score_breakdown)
+          || row.score_breakdown.length !== 7 || !row.score_breakdown.every(isScoreDimension)
+          || new Set(row.score_breakdown.map(dimension => dimension.key)).size !== 7) return false
+    }
     if (index > 0) {
       const previous = value.repositories[index - 1] as RepositoryRanking
       const tierDelta = rankingTierOrder[previous.hard_constraint_tier] - rankingTierOrder[row.hard_constraint_tier]
-      const evidenceDelta = previous.preferred.evidence_match_count - row.preferred.evidence_match_count
-      if (tierDelta > 0 || (tierDelta === 0 && evidenceDelta > 0)
-          || (tierDelta === 0 && evidenceDelta === 0 && previous.repository_id > row.repository_id)) return false
+      if (tierDelta > 0) return false
+      if (tierDelta === 0 && scoredRanking) {
+        const scoreDelta = (previous.total_score as number) - (row.total_score as number)
+        const previousCoverage = previous.evidence_coverage as EvidenceCoverage
+        const rowCoverage = row.evidence_coverage as EvidenceCoverage
+        const coverageDelta = previousCoverage.coverage - rowCoverage.coverage
+        if (scoreDelta < -1e-9) return false
+        if (Math.abs(scoreDelta) <= 1e-9 && coverageDelta < -1e-9) return false
+        if (Math.abs(scoreDelta) <= 1e-9 && Math.abs(coverageDelta) <= 1e-9
+            && previous.repository_id > row.repository_id) return false
+      } else if (tierDelta === 0) {
+        const evidenceDelta = previous.preferred.evidence_match_count - row.preferred.evidence_match_count
+        if (evidenceDelta < 0 || (evidenceDelta === 0 && previous.repository_id > row.repository_id)) return false
+      }
     }
     const recommendation = row.recommendation
     const expectedStatus = { meets_requirements: 'recommended', needs_review: 'needs_review', hard_conflict: 'not_recommended' }[row.hard_constraint_tier]

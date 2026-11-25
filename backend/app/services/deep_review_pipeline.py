@@ -244,7 +244,8 @@ class DeepReviewPipeline:
             logic_group_results=logic_results or [], usage=usage or _unknown_usage(),
             response_hash=response_hash)
 
-    async def generate(self, owner, task_id, run_id, revision, bundle, bundle_hash, operation_id=None):
+    async def generate(self, owner, task_id, run_id, revision, bundle, bundle_hash,
+                       operation_id=None, ranking_metadata=None):
         if not isinstance(bundle, dict):
             raise DeepReviewInputError('DEEP_REVIEW_INVALID_BUNDLE')
         if revision.status != 'confirmed' or revision.confirmed_at is None:
@@ -362,11 +363,16 @@ class DeepReviewPipeline:
             str(row['candidate']['repository_id']): row['candidate'].get('repository') or {}
             for row in prepared
         }
+        for repository_id, metadata in (ranking_metadata or {}).items():
+            if isinstance(metadata, dict):
+                metadata_by_id[str(repository_id)] = {
+                    **(metadata_by_id.get(str(repository_id)) or {}), **metadata}
+        created_at = _now()
         return DeepReviewReport(
             owner=owner, task_id=str(task_id), run_id=run_id,
             confirmed_revision_id=str(revision.revision_id), operation_id=operation_id or str(uuid4()),
             revision_hash=digest, plan_hash=bundle['plan_hash'], bundle_hash=bundle_hash,
             model=self.provider.deepseek_model, prompt_version=PROMPT_VERSION, notice=NOTICE,
-            created_at=_now(), status=aggregate_status(statuses), repositories=repositories,
+            created_at=created_at, status=aggregate_status(statuses), repositories=repositories,
             summary=summary, warnings=warnings,
-            ranking=build_ranking_results(repositories, metadata_by_id))
+            ranking=build_ranking_results(repositories, metadata_by_id, as_of=created_at))

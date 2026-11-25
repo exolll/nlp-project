@@ -154,7 +154,10 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         from app.services.evidence_bundle import EvidenceBundleStore
         from app.services.search_persistence import _digest, _encode
         manifests = RunManifestStore(store.storage)
-        operation = manifests.read(identity, record['run_id'])['deep_review_operation']
+        manifest = manifests.read(identity, record['run_id'])
+        operation = manifest['deep_review_operation']
+        ranking_metadata = {str(repository_id): (candidate.get('metadata') or {})
+                            for repository_id, candidate in manifest['candidates'].items()}
         try:
             with factory.open(store, config) as backend:
                 persistence = backend.persistence
@@ -167,7 +170,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
                     transport=transport)
                 report = anyio.run(pipeline.generate, identity, record['task_id'], record['run_id'],
                                    confirmed, bundle, retrieval['bundle_hash'],
-                                   operation['operation_id'])
+                                   operation['operation_id'], ranking_metadata)
                 data = _encode(report.model_dump(mode='json'))
                 key = f"deep-reviews/{operation['operation_id']}/report.json"
                 persistence._put_immutable(key, data, 'application/json')

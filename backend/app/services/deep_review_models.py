@@ -64,7 +64,8 @@ class LogicGroupResult(_Strict):
     result: Literal['pass', 'fail', 'unknown']
 
 
-RANKING_CONFIG_VERSION = 'hard-tier-preferred-v1'
+RANKING_CONFIG_VERSION = 'hard-tier-score-v2'
+LEGACY_RANKING_CONFIG_VERSION = 'hard-tier-preferred-v1'
 
 
 class HardConstraintUnit(_Strict):
@@ -121,6 +122,48 @@ class RecommendationResult(_Strict):
     limitations: list[str] = Field(min_length=1)
 
 
+class ScoreDimension(_Strict):
+    key: Literal['required_features', 'topic', 'technology', 'language',
+                 'project_type', 'preferred', 'activity']
+    label: str = Field(min_length=1)
+    weight: float = Field(ge=0, le=1)
+    applicable: bool
+    score: float | None = Field(default=None, ge=0, le=100)
+    units_total: int = Field(ge=0)
+    supports: int = Field(ge=0)
+    contradicts: int = Field(ge=0)
+    insufficient: int = Field(ge=0)
+    missing_data: bool = False
+    detail: str | None = None
+
+    @model_validator(mode='after')
+    def score_matches_applicability(self):
+        if self.applicable != (self.score is not None):
+            raise ValueError('applicable dimension must have a score')
+        if self.units_total != self.supports + self.contradicts + self.insufficient:
+            raise ValueError('dimension unit counts must add up')
+        return self
+
+
+class EvidenceCoverage(_Strict):
+    applicable_units: int = Field(ge=0)
+    supported: int = Field(ge=0)
+    contradicted: int = Field(ge=0)
+    insufficient: int = Field(ge=0)
+    coverage: float = Field(ge=0, le=1)
+    not_applicable_dimensions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def counts_match(self):
+        if self.applicable_units != self.supported + self.contradicted + self.insufficient:
+            raise ValueError('coverage counts must add up')
+        expected = 0.0 if not self.applicable_units else (
+            (self.supported + self.contradicted) / self.applicable_units)
+        if abs(self.coverage - expected) > 1e-9:
+            raise ValueError('coverage does not match its counts')
+        return self
+
+
 class RepositoryRanking(_Strict):
     repository_id: str = Field(min_length=1)
     full_name: str | None = None
@@ -130,6 +173,11 @@ class RepositoryRanking(_Strict):
     hard_constraint_units: list[HardConstraintUnit]
     preferred: PreferredRankingSummary
     recommendation: RecommendationResult
+    total_score: float | None = Field(default=None, ge=0, le=100)
+    score_breakdown: list[ScoreDimension] = Field(default_factory=list)
+    evidence_coverage: EvidenceCoverage | None = None
+    ranking_tier: Literal['meets_requirements', 'needs_review', 'hard_conflict'] | None = None
+    ranking_explanation: str | None = None
 
     @model_validator(mode='after')
     def recommendation_matches_tier(self):
@@ -137,6 +185,14 @@ class RepositoryRanking(_Strict):
                     'hard_conflict': 'not_recommended'}[self.hard_constraint_tier]
         if self.recommendation.status != expected:
             raise ValueError('recommendation status does not match hard constraint tier')
+        scored = self.total_score is not None
+        if scored and (self.ranking_tier != self.hard_constraint_tier
+                       or self.evidence_coverage is None or len(self.score_breakdown) != 7
+                       or not self.ranking_explanation):
+            raise ValueError('scored ranking requires tier, coverage, breakdown and explanation')
+        if not scored and (self.ranking_tier is not None or self.evidence_coverage is not None
+                           or self.score_breakdown or self.ranking_explanation is not None):
+            raise ValueError('unscored ranking must not carry scoring fields')
         return self
 
 
@@ -148,7 +204,9 @@ class ExcludedRepository(_Strict):
 
 
 class RankingResults(_Strict):
-    ranking_config_version: Literal['hard-tier-preferred-v1'] = RANKING_CONFIG_VERSION
+    ranking_config_version: Literal['hard-tier-preferred-v1',
+                                    'hard-tier-score-v2'] = RANKING_CONFIG_VERSION
+    scored_at: str | None = None
     repositories: list[RepositoryRanking]
     excluded_repositories: list[ExcludedRepository]
 

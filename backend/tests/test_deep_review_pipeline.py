@@ -310,7 +310,7 @@ def test_five_repositories_make_exactly_five_calls():
     assert report.summary.repositories_completed == 5
     assert report.summary.usage.calls == 5
     assert report.ranking is not None
-    assert report.ranking.ranking_config_version == 'hard-tier-preferred-v1'
+    assert report.ranking.ranking_config_version == 'hard-tier-score-v2'
     assert len(report.ranking.repositories) == 5
 
 

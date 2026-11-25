@@ -571,8 +571,8 @@ def test_logic_group_result_must_match_member_truth_table():
     repository.logic_group_results[0] = repository.logic_group_results[0].model_copy(
         update={'result': 'pass'})
     ranked = build_ranking_results([repository]).repositories[0]
-    assert ranked.hard_constraint_units[0].result == 'fail'
-    assert ranked.hard_constraint_tier == 'hard_conflict'
+    assert ranked.hard_constraint_units[0].result == 'unknown'
+    assert ranked.hard_constraint_tier == 'needs_review'
 
 
 def test_any_group_pass_does_not_report_other_members_as_repository_conflicts():
@@ -691,11 +691,11 @@ def test_logic_group_operator_mismatch_is_not_trusted():
     assert ranked.hard_constraint_tier == 'needs_review'
 
 
-def test_missing_logic_group_with_failure_is_conservative_conflict():
+def test_missing_logic_group_is_unknown_not_automatic_conflict():
     reviews = [ranking_review('required', 'contradicts', group='group-1', operator='ALL')]
     repository = ranking_repository('repo', reviews).model_copy(update={'logic_group_results': []})
     result = build_ranking_results([repository])
-    assert result.repositories[0].hard_constraint_tier == 'hard_conflict'
+    assert result.repositories[0].hard_constraint_tier == 'needs_review'
 
 
 @pytest.mark.parametrize('group_state', ['missing', 'mismatch'])
@@ -756,6 +756,286 @@ def test_hard_constraint_reason_drops_citation_outside_repository_input_chunks()
     assert ranked.hard_constraint_tier == 'needs_review'
     assert ranked.hard_constraint_units[0].result == 'unknown'
     assert all(reason.citations == [] for reason in ranked.recommendation.reasons)
+
+
+def score_review(field, verdict='supports', modality='required', cite=True):
+    review = ranking_review(modality, verdict, cite=cite)
+    return review.model_copy(update={'field': field})
+
+
+def activity_metadata(stars=1000, forks=200, pushed_at=NOW):
+    return {'stars': stars, 'forks': forks, 'pushed_at': pushed_at.isoformat()}
+
+
+def test_all_dimensions_applicable_and_passing_gives_full_score():
+    reviews = [score_review('required_features'),
+               score_review('project_topic', modality='informational'),
+               score_review('required_technologies'),
+               score_review('programming_languages'),
+               score_review('project_type'),
+               score_review('preferred_features', modality='preferred')]
+    row = build_ranking_results([ranking_repository('repo', reviews)],
+                                {'repo': activity_metadata()}, as_of=NOW).repositories[0]
+    assert row.total_score == 100.0
+    assert all(dimension.score == 100.0 for dimension in row.score_breakdown)
+    assert row.hard_constraint_tier == 'meets_requirements'
+
+
+def test_needs_review_repositories_are_ordered_by_score():
+    first = ranking_repository('a', [score_review('required_features', 'insufficient'),
+                                     score_review('preferred_features', modality='preferred')])
+    second = ranking_repository('b', [score_review('required_features', 'insufficient')])
+    result = build_ranking_results([second, first], {'a': activity_metadata(),
+                                                     'b': activity_metadata()}, as_of=NOW)
+    assert [row.repository_id for row in result.repositories] == ['a', 'b']
+    assert all(row.hard_constraint_tier == 'needs_review' for row in result.repositories)
+    assert result.repositories[0].total_score > result.repositories[1].total_score
+
+
+def test_hard_conflict_stays_last_even_with_higher_score():
+    needs = ranking_repository('needs', [score_review('required_features', 'insufficient')])
+    conflict = ranking_repository('conflict', [
+        score_review('required_features', 'contradicts'),
+        score_review('project_topic', modality='informational'),
+        score_review('required_technologies'), score_review('programming_languages'),
+        score_review('project_type'), score_review('preferred_features', modality='preferred')])
+    metadata = {'needs': activity_metadata(0, 0, NOW), 'conflict': activity_metadata()}
+    result = build_ranking_results([conflict, needs], metadata, as_of=NOW)
+    assert [row.repository_id for row in result.repositories] == ['needs', 'conflict']
+    assert result.repositories[1].total_score > result.repositories[0].total_score
+    assert result.repositories[1].recommendation.status == 'not_recommended'
+
+
+def test_insufficient_is_not_treated_as_contradiction():
+    row = build_ranking_results([ranking_repository(
+        'repo', [score_review('required_features', 'insufficient')])], as_of=NOW).repositories[0]
+    required = next(d for d in row.score_breakdown if d.key == 'required_features')
+    assert (required.supports, required.contradicts, required.insufficient) == (0, 0, 1)
+    assert required.score == 0.0
+    assert row.evidence_coverage.contradicted == 0
+    assert row.evidence_coverage.insufficient == 1
+    assert row.hard_constraint_tier == 'needs_review'
+
+
+def test_preferred_count_does_not_replace_composite_score():
+    strong = ranking_repository('strong', [score_review('required_features')], coverage='truncated')
+    preferred_only = ranking_repository('preferred', [
+        score_review('required_features', 'insufficient')] + [
+        score_review('preferred_features', modality='preferred') for _ in range(5)])
+    metadata = {'strong': activity_metadata(0, 0, NOW), 'preferred': activity_metadata(0, 0, NOW)}
+    result = build_ranking_results([preferred_only, strong], metadata, as_of=NOW)
+    assert [row.repository_id for row in result.repositories] == ['strong', 'preferred']
+    assert result.repositories[1].preferred.supports_count == 5
+    assert result.repositories[0].total_score > result.repositories[1].total_score
+
+
+def test_all_any_group_is_scored_once():
+    reviews = [ranking_review('required', 'supports', group='g', operator='ANY')
+               for _ in range(2)]
+    row = build_ranking_results([ranking_repository('repo', reviews)],
+                                {'repo': activity_metadata()}, as_of=NOW).repositories[0]
+    required = next(d for d in row.score_breakdown if d.key == 'required_features')
+    assert required.units_total == 1 and required.supports == 1
+    assert row.evidence_coverage.applicable_units == 1
+    assert row.hard_constraint_units[0].kind == 'logic_group'
+
+
+def test_not_applicable_dimensions_adjust_denominator():
+    row = build_ranking_results([ranking_repository('repo', [score_review('required_features')])],
+                                {'repo': activity_metadata(0, 0, NOW.replace(year=2020))},
+                                as_of=NOW).repositories[0]
+    assert row.total_score == pytest.approx(87.5)
+    gaps = set(row.evidence_coverage.not_applicable_dimensions)
+    assert gaps == {'Topic Match', 'Technology Match', 'Programming Language Match',
+                    'Project Type Match', 'Preferred Match'}
+
+
+def test_missing_activity_metadata_becomes_not_applicable():
+    row = build_ranking_results([ranking_repository('repo', [score_review('required_features')])],
+                                as_of=NOW).repositories[0]
+    activity = next(d for d in row.score_breakdown if d.key == 'activity')
+    assert activity.missing_data is True
+    assert activity.applicable is False and activity.score is None
+    assert 'Activity / Popularity' in row.evidence_coverage.not_applicable_dimensions
+    assert row.total_score == 100.0
+
+
+def test_partial_activity_metadata_renormalizes_valid_component_weights():
+    row = build_ranking_results([ranking_repository('repo', [score_review('required_features')])],
+                                {'repo': {'stars': 1000}}, as_of=NOW).repositories[0]
+    activity = next(d for d in row.score_breakdown if d.key == 'activity')
+    assert activity.applicable is True and activity.missing_data is True
+    assert activity.score == 100.0
+    assert row.total_score == 100.0
+
+
+def test_stars_cannot_outweigh_required_features():
+    inflated = ranking_repository('inflated', [score_review('required_features', 'insufficient')],
+                                  coverage='truncated')
+    solid = ranking_repository('solid', [score_review('required_features')], coverage='truncated')
+    metadata = {'inflated': activity_metadata(100000, 100000, NOW),
+                'solid': activity_metadata(0, 0, NOW)}
+    result = build_ranking_results([inflated, solid], metadata, as_of=NOW)
+    assert [row.repository_id for row in result.repositories] == ['solid', 'inflated']
+    assert result.repositories[1].total_score < result.repositories[0].total_score
+
+
+def test_retrieval_similarity_is_not_part_of_score():
+    first = ranking_repository('a', [score_review('required_features')])
+    second = ranking_repository('b', [score_review('required_features')])
+    metadata = {'a': activity_metadata(), 'b': activity_metadata()}
+    result = build_ranking_results([first, second], metadata, as_of=NOW)
+    assert result.repositories[0].total_score == result.repositories[1].total_score
+
+
+def test_equal_score_uses_coverage_then_repository_id():
+    lower = ranking_repository('a', [score_review('required_features'),
+                                     score_review('project_topic', modality='informational'),
+                                     score_review('project_topic', 'insufficient', modality='informational')])
+    higher = ranking_repository('b', [score_review('required_features'),
+                                      score_review('project_topic', modality='informational'),
+                                      score_review('project_topic', modality='informational'),
+                                      score_review('project_topic', 'contradicts', modality='informational'),
+                                      score_review('project_topic', 'insufficient', modality='informational')])
+    metadata = {'a': activity_metadata(0, 0, NOW), 'b': activity_metadata(0, 0, NOW)}
+    result = build_ranking_results([lower, higher], metadata, as_of=NOW)
+    assert result.repositories[0].total_score == result.repositories[1].total_score
+    assert result.repositories[0].evidence_coverage.coverage > result.repositories[1].evidence_coverage.coverage
+    assert [row.repository_id for row in result.repositories] == ['b', 'a']
+
+
+def test_scoring_is_repeatable_for_same_inputs():
+    repository = ranking_repository('repo', [
+        score_review('required_features'), score_review('preferred_features', modality='preferred')])
+    metadata = {'repo': activity_metadata()}
+    first = build_ranking_results([repository], metadata, as_of=NOW).model_dump(mode='json')
+    second = build_ranking_results([repository], metadata, as_of=NOW).model_dump(mode='json')
+    assert first == second
+
+
+def test_ranking_sort_uses_full_precision_before_two_decimal_display():
+    from app.services.deep_review_logic import _ranking_sort_key
+    higher = _ranking_sort_key('needs_review', 82.3464, 0.5, 'a')
+    lower = _ranking_sort_key('needs_review', 82.3461, 0.5, 'b')
+    assert higher < lower
+    assert round(82.3464, 2) == round(82.3461, 2) == 82.35
+    # 82.341 rounds to 82.34, so it cannot share the 82.35 display of 82.3464.
+    assert round(82.341, 2) == 82.34
+
+
+def test_mixed_group_with_prohibited_member_is_not_scored_twice():
+    reviews = [ranking_review('required', 'supports', group='g', operator='ALL'),
+               ranking_review('prohibited', 'contradicts', group='g', operator='ALL')]
+    row = build_ranking_results([ranking_repository('repo', reviews)],
+                                as_of=NOW).repositories[0]
+    required = next(d for d in row.score_breakdown if d.key == 'required_features')
+    assert required.applicable is False and required.units_total == 0
+    assert row.evidence_coverage.applicable_units == 1
+    assert row.evidence_coverage.insufficient == 1
+    assert row.evidence_coverage.coverage == 0.0
+    assert row.total_score == 0.0
+    assert row.hard_constraint_tier == 'hard_conflict'
+
+
+def test_mixed_any_group_with_valid_prohibited_evidence_still_conflicts():
+    reviews = [ranking_review('required', 'supports', group='g', operator='ANY'),
+               ranking_review('prohibited', 'contradicts', group='g', operator='ANY'),
+               *[ranking_review('preferred', 'supports') for _ in range(5)]]
+    repository = ranking_repository('repo', reviews)
+    row = build_ranking_results([repository], as_of=NOW).repositories[0]
+    assert len(row.hard_constraint_units) == 1
+    assert repository.hard_constraint_summary.prohibited.failed == 1
+    assert repository.hard_constraint_summary.prohibited.total == 1
+    assert row.hard_constraint_tier == 'hard_conflict'
+    assert row.recommendation.status == 'not_recommended'
+    assert row.preferred.evidence_match_count == 5
+    assert row.evidence_coverage.applicable_units == 6
+    assert row.evidence_coverage.insufficient == 1
+    assert row.total_score == 100.0
+
+
+@pytest.mark.parametrize('operator', ['ALL', 'ANY'])
+def test_mixed_group_without_prohibited_counter_evidence_is_conservative(operator):
+    reviews = [ranking_review('required', 'supports', group='g', operator=operator),
+               ranking_review('prohibited', 'insufficient', group='g', operator=operator)]
+    repository = ranking_repository('repo', reviews)
+    row = build_ranking_results([repository], as_of=NOW).repositories[0]
+    assert row.hard_constraint_tier == 'needs_review'
+    assert row.hard_constraint_tier != 'hard_conflict'
+    assert row.hard_constraint_units[0].result == 'unknown'
+    assert repository.hard_constraint_summary.prohibited.failed == 0
+    assert repository.hard_constraint_summary.prohibited.unknown == 1
+    assert row.evidence_coverage.applicable_units == 1
+    assert row.evidence_coverage.insufficient == 1
+
+
+def test_mixed_group_emits_structural_warning():
+    reviews = [ranking_review('required', 'supports', group='g', operator='ALL'),
+               ranking_review('prohibited', 'insufficient', group='g', operator='ALL')]
+    _, warnings = logic_group_results([review.model_dump(mode='json') for review in reviews])
+    assert any(warning['code'] == 'logic_group_inconsistent'
+               and warning['logic_group_id'] == 'g' for warning in warnings)
+
+
+def test_normal_required_and_prohibited_groups_keep_truth_table_results():
+    required_all = ranking_repository('required-all', [
+        ranking_review('required', 'supports', group='r', operator='ALL'),
+        ranking_review('required', 'insufficient', group='r', operator='ALL')])
+    prohibited_all = ranking_repository('prohibited-all', [
+        ranking_review('prohibited', 'supports', group='p', operator='ALL'),
+        ranking_review('prohibited', 'contradicts', group='p', operator='ALL')])
+    prohibited_any = ranking_repository('prohibited-any', [
+        ranking_review('prohibited', 'supports', group='p', operator='ANY'),
+        ranking_review('prohibited', 'contradicts', group='p', operator='ANY')])
+    result = build_ranking_results([required_all, prohibited_all, prohibited_any], as_of=NOW)
+    by_id = {row.repository_id: row for row in result.repositories}
+    assert by_id['required-all'].hard_constraint_units[0].result == 'unknown'
+    assert by_id['required-all'].hard_constraint_tier == 'needs_review'
+    assert by_id['prohibited-all'].hard_constraint_units[0].result == 'fail'
+    assert by_id['prohibited-all'].hard_constraint_tier == 'hard_conflict'
+    assert by_id['prohibited-any'].hard_constraint_units[0].result == 'pass'
+    assert by_id['prohibited-any'].hard_constraint_tier == 'meets_requirements'
+
+
+def test_activity_is_clamped_and_missing_values_are_flagged():
+    huge = ranking_repository('huge', [score_review('required_features')])
+    broken = ranking_repository('broken', [score_review('required_features')])
+    metadata = {'huge': {'stars': 10**9, 'forks': 10**9, 'pushed_at': NOW.isoformat()},
+                'broken': {'stars': -1, 'forks': 'many', 'pushed_at': 'not-a-date'}}
+    result = build_ranking_results([huge, broken], metadata, as_of=NOW)
+    for row in result.repositories:
+        assert 0 <= row.total_score <= 100
+        activity = next(d for d in row.score_breakdown if d.key == 'activity')
+        assert activity.score is None or 0 <= activity.score <= 100
+    huge_row = next(row for row in result.repositories if row.repository_id == 'huge')
+    broken_row = next(row for row in result.repositories if row.repository_id == 'broken')
+    assert next(d for d in huge_row.score_breakdown if d.key == 'activity').score == 100.0
+    broken_activity = next(d for d in broken_row.score_breakdown if d.key == 'activity')
+    assert broken_activity.applicable is False and broken_activity.score is None
+    assert broken_activity.missing_data is True
+
+
+def test_repository_input_order_does_not_change_scored_ranking():
+    first = ranking_repository('a', [score_review('required_features')])
+    second = ranking_repository('b', [score_review('required_features', 'insufficient')])
+    metadata = {'a': activity_metadata(), 'b': activity_metadata(0, 0, NOW)}
+    forward = build_ranking_results([first, second], metadata, as_of=NOW).model_dump(mode='json')
+    reverse = build_ranking_results([second, first], metadata, as_of=NOW).model_dump(mode='json')
+    assert forward == reverse
+
+
+def test_legacy_ranking_without_score_fields_remains_valid():
+    from app.services.deep_review_models import RankingResults
+    row = build_ranking_results([ranking_repository('repo', [score_review('required_features')])],
+                                as_of=NOW).repositories[0].model_dump(mode='json')
+    for key in ('total_score', 'score_breakdown', 'evidence_coverage', 'ranking_tier',
+                'ranking_explanation'):
+        row.pop(key)
+    legacy = RankingResults.model_validate({
+        'ranking_config_version': 'hard-tier-preferred-v1',
+        'repositories': [row], 'excluded_repositories': []})
+    assert legacy.repositories[0].total_score is None
+    assert legacy.repositories[0].score_breakdown == []
 
 
 def test_old_report_without_ranking_remains_compatible():
