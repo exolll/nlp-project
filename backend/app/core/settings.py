@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     extraction_max_input_tokens: int = Field(20000, gt=0)
     extraction_max_calls: int = Field(5, gt=0)
     max_requirement_revisions: int = Field(50, gt=0, le=50)
-    max_task_extractions: int = Field(3, gt=0, le=3)
+    max_task_extractions: int = Field(10, gt=0, le=10)
 
     @model_validator(mode='after')
     def deployment_safety(self):

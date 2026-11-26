@@ -354,7 +354,7 @@ def test_preflight_never_calls(h, change):
     assert 'planner_operation' not in h.manifest()
 
 
-@pytest.mark.parametrize('change', ['extra', 'wrong_group', 'out_of_bounds', 'empty_ready',
+@pytest.mark.parametrize('change', ['extra', 'wrong_group', 'out_of_bounds',
                                   'skip_query', 'budget', 'missing_group', 'term_invented',
                                   'term_wrong_source', 'strict', 'syntax'])
 def test_invalid_drafts(h, change):
@@ -366,8 +366,6 @@ def test_invalid_drafts(h, change):
         g['sources'] = ['/required_features/0']
     elif change == 'out_of_bounds':
         g['sources'] = ['/project_topic/9']
-    elif change == 'empty_ready':
-        g['sources'] = []
     elif change == 'skip_query':
         g['status'] = 'skipped'
     elif change == 'budget':
@@ -615,6 +613,41 @@ def test_translation_keeps_pointer(h):
     assert op['draft_key'] == f"planner-drafts/{op['plan_id']}.json"
 
 
+def test_declared_sources_are_trimmed_to_executed_queries(h):
+    h.revision.requirements.project_description = '补充描述'
+    items(h.revision)
+    group = h.body['groups'][0]
+    group['sources'] = ['/project_topic', '/project_description']
+    plan = h.run()
+    assert plan.groups[0].source_requirement_pointers == ['/project_topic']
+    operation = h.manifest()['planner_operation']
+    assert operation['source_normalization'] == [{
+        'group': 'A',
+        'declared': ['/project_description', '/project_topic'],
+        'used': ['/project_topic']}]
+
+
+def test_empty_declared_sources_are_derived_from_executed_queries(h):
+    h.body['groups'][0]['sources'] = []
+    plan = h.run()
+    assert plan.groups[0].source_requirement_pointers == ['/project_topic']
+
+
+def test_missing_declared_source_is_added_from_executed_queries(h):
+    h.revision.requirements.project_description = '补充描述'
+    items(h.revision)
+    group = h.body['groups'][0]
+    group['sources'] = ['/project_topic']
+    group['queries'][0]['terms'][0]['source'] = '/project_description'
+    plan = h.run()
+    assert plan.groups[0].source_requirement_pointers == ['/project_description']
+    operation = h.manifest()['planner_operation']
+    assert operation['source_normalization'] == [{
+        'group': 'A',
+        'declared': ['/project_topic'],
+        'used': ['/project_description']}]
+
+
 @pytest.mark.parametrize('text', ['bad\nterm', 'bad\tterm', 'bad\x00term', 'bad\x7fterm',
                                   'bad"term', "bad'term", 'bad\\term', 'repo:secret', '   '])
 def test_term_syntax_rejected(h, text):
@@ -718,7 +751,7 @@ def test_technology_expansion_rejected(h, field):
         h.run()
 
 
-@pytest.mark.parametrize('change', ['missing_reason', 'blank_reason', 'skip_sources', 'unused_source'])
+@pytest.mark.parametrize('change', ['missing_reason', 'blank_reason', 'skip_sources'])
 def test_group_source_and_skip_contract(h, change):
     group = h.body['groups'][1]
     if change == 'missing_reason':
@@ -727,10 +760,6 @@ def test_group_source_and_skip_contract(h, change):
         group['skip_reason'] = '  '
     elif change == 'skip_sources':
         group['sources'] = ['/required_features/0']
-    else:
-        h.revision.requirements.domain = '搜索'
-        items(h.revision)
-        h.body['groups'][0]['sources'].append('/domain')
     with pytest.raises(PlannerError):
         h.run()
 

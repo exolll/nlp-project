@@ -17,6 +17,7 @@ from app.schemas.requirements import (
     RequirementEvidence, RequirementItem, RequirementRevision, RevisionEdit,
 )
 from app.services.extraction_provider import PROMPT_VERSION, ProviderError, build_payload, call_provider
+from app.services.requirement_quality import validate_quality
 from app.services.requirement_validation import (
     check, extraction_diagnostic, language_logic_explicit, resolve_spans, signature, validate_coverage, validate_extraction, validate_links,
 )
@@ -376,6 +377,11 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
             items = [RequirementItem.model_validate(item) for item in revision['requirement_items']]
             if revision['requirements']['uncertain_information'] or not language_logic_explicit(items):
                 fail(409, 'REQUIREMENTS_UNRESOLVED', '请先编辑消除歧义，并明确多语言硬要求的同组 ALL/ANY 关系。')
+            quality = validate_quality(RequirementRevision.model_validate(revision))
+            if not quality['ok']:
+                fail(422, 'REQUIREMENT_EVIDENCE_MISMATCH',
+                     '需求文字与原文证据不一致，请修改后保存新版本再确认。',
+                     details={'evidence_mismatches': quality['evidence_mismatches']})
             store.write_rate(session, now)
             revision.update(status='confirmed', confirmed_at=now.isoformat())
             return revision

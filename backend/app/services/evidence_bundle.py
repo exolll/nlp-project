@@ -147,8 +147,10 @@ class EvidenceBundleService:
                 progress = EmbeddingProgress()
 
                 def embed(texts):
-                    summary = self.indexer.embeddings.embed_sync(texts, progress, max_batches=1,
-                                                                 max_tokens=16384)
+                    summary = self.indexer.embeddings.embed_sync(
+                        texts, progress,
+                        max_batches=max(1, int(getattr(self.settings, 'embedding_max_batches', 32))),
+                        max_tokens=16384)
                     return [summary.vectors[text] for text in texts]
 
                 chroma = self.indexer.chroma_factory()

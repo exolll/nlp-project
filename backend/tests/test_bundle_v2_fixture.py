@@ -67,6 +67,7 @@ class Persistence:
 class Indexer:
     def __init__(self, chunk_manifest):
         self.chunk_manifest = chunk_manifest
+        self.last_limits = None
         self.embeddings = SimpleNamespace(embed_sync=self._embed)
         self.chroma = SimpleNamespace(query=self._query)
 
@@ -77,6 +78,7 @@ class Indexer:
         return self.chroma
 
     def _embed(self, texts, progress, **limits):
+        self.last_limits = limits
         vector = [1.0] + [0.0] * 1023
         return SimpleNamespace(vectors={text: vector for text in texts}, cache_hits=0,
                                batches=1, attempts=1)
@@ -191,7 +193,8 @@ def test_bundle_v2_fixture_end_to_end(tmp_path):
     storage, store, run_id = stable_manifest(tmp_path, rev, raw)
     document, index_key = install_chunk_index(store, run_id, rev, raw)
     persistence = Persistence(storage, document)
-    service = EvidenceBundleService(persistence, Indexer(document),
+    indexer = Indexer(document)
+    service = EvidenceBundleService(persistence, indexer,
                                     SimpleNamespace(embedding_model='BAAI/bge-m3',
                                                     embedding_dimension=1024))
     bundle = service.publish(OWNER, rev.task_id, run_id, rev)
@@ -203,6 +206,7 @@ def test_bundle_v2_fixture_end_to_end(tmp_path):
     candidate = bundle['candidates'][0]
     for field in ('commit_sha', 'blob_sha', 'content_hash', 'readme_path', 'collected_at'):
         assert candidate[field] == REAL[field]
+    assert indexer.last_limits['max_batches'] >= 2
     assert candidate['items'][0]['status'] == 'retrieved'
     assert candidate['items'][0]['relevance'] == 'unverified'
     again, _ = EvidenceBundleStore(storage).read(OWNER, run_id, rev)

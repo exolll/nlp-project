@@ -21,7 +21,7 @@ from app.services.requirements import revision_task
 class SearchBudget(Contract):
     model_calls: int = Field(ge=1, le=1, strict=True)
     github_requests: int = Field(ge=1, le=20, strict=True)
-    search_requests: int = Field(default=5, ge=1, le=5, strict=True)
+    search_requests: int = Field(default=5, ge=1, le=9, strict=True)
     readme_candidates: int = Field(ge=0, le=5, strict=True)
     per_page: int = Field(default=5, ge=1, le=5, strict=True)
     max_pages: int = Field(default=1, ge=1, le=1, strict=True)
@@ -440,8 +440,8 @@ def install_routes(app, state, owner, settings, factory=None):
             if existing:
                 return existing, False
             runs = store.task(session, task_id).setdefault('search_runs', {})
-            if len(runs) >= 3:
-                fail(429, 'SEARCH_RUN_LIMIT', '每个任务最多允许三次搜索运行。')
+            if len(runs) >= 10:
+                fail(429, 'SEARCH_RUN_LIMIT', '每个任务最多允许十次搜索运行。')
             store.write_rate(session, utcnow())
             runs[key] = deepcopy(record)
             return record, True

@@ -83,6 +83,10 @@ Pointers are RFC6901 paths relative to requirements, beginning with /.
 Examples: /project_topic and /required_features/0 are valid when present in the catalog;
 project_topic, required_features[0], /required_features and /requirements/project_topic
 are invalid. group.sources must equal the unique union of term.source across its queries.
+Do not list a source in group.sources unless at least one query term uses it.
+If a group has more positive sources than the 1..3 query limit, omit the less
+important source from the plan entirely; never declare it unused. Prefer omitting
+a preferred source over declaring it without a query.
 For terms from /required_features/0 and /required_features/1, sources must be
 ["/required_features/0", "/required_features/1"], never ["required_features"].
 Catalog positive=false entries are constraints only, not positive query sources.
@@ -178,6 +182,31 @@ def _query_text(terms, technical):
     return ' '.join(sorted(set(tokens)))
 
 
+def source_normalization(raw):
+    """Report ready-group source declarations that differ from the executed queries."""
+    try:
+        groups = raw['groups']
+    except (KeyError, TypeError):
+        return []
+    warnings = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict) or group.get('status') != 'ready':
+            continue
+        declared = group.get('sources')
+        queries = group.get('queries')
+        if not isinstance(declared, list) or not isinstance(queries, list):
+            continue
+        used = sorted({
+            term['source'] for query in queries if isinstance(query, dict)
+            for term in (query.get('terms') or []) if isinstance(term, dict)
+            and isinstance(term.get('source'), str)
+        })
+        declared = sorted({source for source in declared if isinstance(source, str)})
+        if declared != used:
+            warnings.append({'group': group.get('name'), 'declared': declared, 'used': used})
+    return warnings
+
+
 def compile_draft(raw, revision, run_id, operation):
     try:
         draft = PlannerDraft.model_validate(raw)
@@ -192,13 +221,16 @@ def compile_draft(raw, revision, run_id, operation):
             if group.status == 'skipped':
                 _require(not group.queries and not group.sources)
                 _require(bool(group.skip_reason and group.skip_reason.strip()))
+                group_sources = []
             else:
-                _require(bool(group.sources) and 1 <= len(group.queries) <= 3
-                         and group.skip_reason is None)
-                _require(set(group.sources) == {t.source for q in group.queries for t in q.terms})
+                _require(1 <= len(group.queries) <= 3 and group.skip_reason is None)
+                # Provenance follows the queries that will actually run; a model
+                # declaration is advisory and may not invent or omit coverage.
+                group_sources = sorted({t.source for query in group.queries for t in query.terms})
+                _require(bool(group_sources) and set(group_sources) <= allowed)
             for index, query in enumerate(group.queries):
                 pointers = sorted({t.source for t in query.terms})
-                _require(set(pointers) <= set(group.sources))
+                _require(set(pointers) <= set(group_sources))
                 selected = [sources[p] for p in pointers]
                 modalities = {i.modality for i in selected}
                 _require('preferred' not in modalities or modalities == {'preferred'})
@@ -247,7 +279,7 @@ def compile_draft(raw, revision, run_id, operation):
                 queries[digest] = document
             groups.append(dict(group_id=str(uuid5(UUID(operation['plan_id']), group.name)),
                                group_name=group.name, group_purpose='Discovery ' + group.name,
-                               source_requirement_pointers=sorted(group.sources), group_status=group.status,
+                               source_requirement_pointers=group_sources, group_status=group.status,
                                skip_reason=(group.skip_reason if allowed else '没有可用正向来源')
                                if group.status == 'skipped' else None,
                                created_at=operation['created_at'], queries=list(queries.values())))
@@ -364,8 +396,15 @@ class QueryPlanner:
             _require(op['draft_key'] == f"planner-drafts/{op['plan_id']}.json", 'PLANNER_DRAFT_IDENTITY')
             raw, _ = self.persistence.storage.read_version(op['draft_key'])
             _require(raw is not None and _hash(raw) == op['draft_hash'], 'PLANNER_DRAFT_UNAVAILABLE')
+            draft = extraction_provider.strict_json(raw)
             try:
-                plan = compile_draft(extraction_provider.strict_json(raw), revision, run_id, op)
+                warnings = source_normalization(draft)
+                if warnings:
+                    op = self._update(owner, run_id, op, source_normalization=warnings)
+            except Exception:
+                pass
+            try:
+                plan = compile_draft(draft, revision, run_id, op)
             except Exception as exc:
                 code = exc.code if isinstance(exc, PlannerError) else 'PLANNER_INVALID_DRAFT'
                 self._update(owner, run_id, op, status='failed', error_code=code)

@@ -32,6 +32,12 @@ The field property in EVERY item/evidence/uncertainty is a BUSINESS FIELD NAME,
 never a value_path: field="required_features", value_path="required_features[0]".
 Evidence has field="required_features" too, NEVER field="required_features[0]".
 Link each evidence to its item and each item to its evidence_ids.
+Requirement text must stay faithful to the original material. Preserve the source
+wording; do not expand, add, infer or merge separate passages into one requirement.
+Each requirement should be fully covered by one verbatim evidence span. If the source
+is ambiguous, keep the ambiguity or mark it uncertain instead of completing it.
+Never invent functionality the source does not state. evidence_ids must point to the
+exact original evidence that supports that requirement.
 Never omit prohibitions or remove negation: put prohibited features/technologies
 in required_features/required_technologies, retaining negation in text and
 modality=prohibited. required fields only use required/prohibited; preferred fields

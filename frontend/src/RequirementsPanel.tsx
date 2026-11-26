@@ -22,12 +22,54 @@ function restoreAttempt(key: string): { attempt: Attempt | null; error: string }
     return { attempt: value, error: '' }
   } catch { return { attempt: null, error: '无法读取当前会话的提取记录。为避免重复计费，已停止发送；仍可刷新服务端结果。请恢复浏览器会话存储后重载页面。' } }
 }
+type EvidenceMismatch = {
+  requirement_item_id: string | null; field: string | null; reason: string; evidence_ids: string[]
+}
+function evidenceMismatches(error: Failure): EvidenceMismatch[] {
+  const details = error.info.details as { evidence_mismatches?: unknown } | null
+  const rows = details?.evidence_mismatches
+  if (!Array.isArray(rows)) return []
+  return rows.filter((row): row is EvidenceMismatch => typeof row === 'object' && row !== null
+    && 'reason' in row && typeof row.reason === 'string'
+    && 'evidence_ids' in row && Array.isArray(row.evidence_ids))
+}
+const mismatchReasons: Record<string, string> = {
+  not_verbatim: '需求文字不是原文证据的逐字片段',
+  evidence_missing: '绑定的证据不存在',
+  evidence_not_bound: '证据没有绑定到该需求条目',
+  empty_evidence_ids: '该需求没有绑定证据',
+  empty_text: '需求文字为空',
+  duplicate_evidence_id: '证据 ID 重复',
+}
+function EvidenceMismatchList({ error, revision }: { error: Failure; revision: Revision | null }) {
+  const rows = evidenceMismatches(error)
+  if (!revision || !rows.length) return null
+  const items = new Map(revision.requirement_items.map(item => [item.requirement_item_id, item]))
+  const evidence = new Map(revision.requirements.source_evidence.map(row => [row.evidence_id, row]))
+  return <div className="warning" role="alert">
+    <strong>需要修改的需求</strong>
+    <ul>{rows.map((row, index) => {
+      const item = row.requirement_item_id ? items.get(row.requirement_item_id) : null
+      return <li key={`${row.requirement_item_id ?? 'evidence'}-${index}`}>
+        <p>{item ? `${item.field} · ${item.requirement_item_id}` : (row.field ?? '未知字段')}</p>
+        {item && <p>当前需求文字：{item.text}</p>}
+        <p>失败原因：{mismatchReasons[row.reason] ?? row.reason}</p>
+        {row.evidence_ids.map(id => {
+          const quote = evidence.get(id)
+          return <p key={id}>对应证据 {id}：{quote ? quote.original_text : '未找到'}</p>
+        })}
+      </li>
+    })}</ul>
+    <p className="muted">把需求文字改成证据中真实存在的逐字片段，保存为新版本后再确认。</p>
+  </div>
+}
 function asFailure(value: unknown): Failure {
   return value instanceof Failure ? value : new Failure(0, { error_code: 'CLIENT_ERROR', message: value instanceof Error ? value.message : '操作未完成，请先刷新核对。', retryable: true, details: null, request_id: '' })
 }
 function friendlyError(error: Failure): string {
   if (error.status === 401) return '会话已失效或无权访问此任务。本地编辑内容仍保留；请恢复有效会话后刷新，不会自动开始新会话或重新提取。'
   if (error.info.error_code === 'REQUIREMENTS_UNRESOLVED') return '服务端仍检测到未解决歧义或多语言硬要求缺少同组 ALL / ANY。请刷新核对，再编辑并保存新版本。'
+  if (error.info.error_code === 'REQUIREMENT_EVIDENCE_MISMATCH') return '部分需求文字不是原文证据的逐字片段，不能确认。请按下列条目修改后保存新版本。'
   if (error.info.error_code === 'INVALID_REVISION') return '服务端未接受条目属性或引用关系。请检查字段类别、禁止语义、逻辑组及歧义引用；本地编辑已保留。'
   if (error.status === 409) return '任务状态或版本已发生变化。请先刷新核对最新版本；本地编辑内容未丢弃，也不会自动覆盖服务器版本。'
   if (/not_configured|configuration|api_key|provider_unavailable|extraction_disabled|extraction_misconfigured/i.test(error.info.error_code)) return '模型服务尚未配置或暂不可用，请联系后端维护者处理。不要在前端填写服务密钥；本地内容已保留。'
@@ -244,7 +286,7 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
     </div></div>
     {storageError && <p className="warning" role="alert">{storageError}</p>}
     {attemptUnsettled && !pending && <div className="warning"><p>已保留本次提取的幂等键，尚未核实对应结果。必须先 GET 刷新核对；即使暂未查询到结果，也不会自动生成新键或重新付费。</p><button className="secondary" disabled={!canRecover} onClick={() => void extract(true)}>核对后重试同一次提取（沿用幂等键）</button></div>}
-    <div className="requirement-feedback" aria-live="polite"><p>{(reading || operation || (pending && !pollPaused)) && <span className="spinner" />}{notice}</p>{pollPaused && pending && <p className="warning">自动读取已暂停（达到时限或读取失败），不代表提取失败。请稍后手动刷新核对；不会自动重新提取。</p>}{error && <div className="error" role="alert"><strong>{friendlyError(error)}</strong><small>{error.info.error_code}{error.info.request_id && ` · 请求编号 ${error.info.request_id}`}</small><button disabled={reading || !!operation} onClick={() => void refresh(true)}>刷新核对，保留编辑</button></div>}</div>
+    <div className="requirement-feedback" aria-live="polite"><p>{(reading || operation || (pending && !pollPaused)) && <span className="spinner" />}{notice}</p>{pollPaused && pending && <p className="warning">自动读取已暂停（达到时限或读取失败），不代表提取失败。请稍后手动刷新核对；不会自动重新提取。</p>}{error && <div className="error" role="alert"><strong>{friendlyError(error)}</strong><small>{error.info.error_code}{error.info.request_id && ` · 请求编号 ${error.info.request_id}`}</small><button disabled={reading || !!operation} onClick={() => void refresh(true)}>刷新核对，保留编辑</button>{error.info.error_code === 'REQUIREMENT_EVIDENCE_MISMATCH' && <EvidenceMismatchList error={error} revision={selected ?? null} />}</div>}</div>
     {job && <details className="extraction-details"><summary>提取记录 · {jobLabels[job.status]} · {new Date(job.created_at).toLocaleString('zh-CN')}</summary><dl><dt>模型</dt><dd>{job.model || '服务端未提供'}</dd><dt>提示词版本</dt><dd>{job.prompt_version || '服务端未提供'}</dd><dt>提取 ID</dt><dd>{job.extraction_id}</dd></dl>{job.error && <div className="error"><strong>{friendlyError(new Failure(422, job.error))}</strong><small>{job.error.error_code}</small></div>}{job.usage ? <><h4>服务端实际用量</h4><pre>{printable(job.usage)}</pre><p className="muted">仅展示返回的用量，不据此编造费用或性能数据。</p></> : <p className="muted">服务端暂未提供用量数据。</p>}</details>}
     {job?.error && <p className="warning" role="alert">{friendlyError(new Failure(422, job.error))}（{job.error.error_code}）</p>}
     {!selected || !draft ? <div className="requirements-empty"><h3>{pending ? '正在提取结构化需求' : '还没有可展示的需求版本'}</h3><p>{pending ? '只在任务排队、提取或校验期间有限轮询。你可以稍后从历史任务恢复结果。' : '请先主动提取，或刷新恢复服务端已有版本。提取失败不会清除原输入材料。'}</p></div> : <>

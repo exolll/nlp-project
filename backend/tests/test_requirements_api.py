@@ -36,7 +36,9 @@ def api_factory(tmp_path, monkeypatch):
         if 'status' in behavior:
             return httpx.Response(behavior['status'], text='private-provider-detail')
         doc = {'source_segments': json.loads(json.loads(request.content)['messages'][1]['content'])['UNTRUSTED_SOURCE_SEGMENTS']}
-        raw = behavior.get('raw', extraction(doc, behavior.get('specs')))
+        configured = behavior.get('raw')
+        raw = configured(doc) if callable(configured) else (
+            configured if configured is not None else extraction(doc, behavior.get('specs')))
         return httpx.Response(200, json=success(json.dumps(raw, ensure_ascii=False), behavior.get('usage')))
     def factory(config=None, storage=None, injected=True):
         config = config or settings
@@ -242,6 +244,39 @@ def test_confirmation_preserves_history_latest_only_and_edit_retry(api_factory):
     assert result['revisions'][1]['parent_revision_id'] == parent['revision_id']
 
 
+@pytest.mark.parametrize('extra', ['库', '，并用讲义中的内容进行现场提问。'])
+def test_confirm_blocks_non_verbatim_evidence_with_item_details(api_factory, extra):
+    def mismatched(doc):
+        raw = extraction(doc)
+        raw['requirements']['required_features'][0] += extra
+        raw['requirement_items'][0]['text'] = raw['requirements']['required_features'][0]
+        return raw
+    api_factory.behavior['raw'] = mismatched
+    client, _, _ = api_factory()
+    headers, _, did = prepare(client)
+    revision = extracted(client, headers, did)
+    response = confirm(client, headers, revision['revision_id'])
+    assert response.status_code == 422
+    body = response.json()
+    assert body['error_code'] == 'REQUIREMENT_EVIDENCE_MISMATCH'
+    mismatch = body['details']['evidence_mismatches'][0]
+    assert mismatch['requirement_item_id'] == revision['requirement_items'][0]['requirement_item_id']
+    assert mismatch['field'] == 'required_features'
+    assert mismatch['reason'] == 'not_verbatim'
+    assert mismatch['evidence_ids']
+    # The revision stays unconfirmed and can be edited again.
+    assert read(client, headers, did)['revisions'][0]['status'] in ('extracted', 'draft')
+
+
+def test_duplicate_warning_does_not_block_confirm_when_evidence_matches(api_factory):
+    api_factory.behavior['specs'] = [('required_features', '实现检索', 'required'),
+                                     ('preferred_features', '实现检索', 'preferred')]
+    client, _, _ = api_factory()
+    headers, _, did = prepare(client)
+    revision = extracted(client, headers, did)
+    assert confirm(client, headers, revision['revision_id']).status_code == 200
+
+
 def test_language_gate_and_semantic_changes_create_ids(api_factory):
     api_factory.behavior['specs'] = [('programming_languages', 'Python', 'required'), ('programming_languages', 'Java', 'required')]
     client, _, _ = api_factory()
@@ -300,9 +335,9 @@ def test_bounded_orphan_recovery_no_replay(api_factory, monkeypatch):
 
 def test_failures_new_key_bounded_and_same_key_never_replayed(api_factory):
     api_factory.behavior['timeout'] = True
-    client, _, _ = api_factory()
+    client, _, _ = api_factory(api_factory.settings.model_copy(update={'extraction_max_calls': 10}))
     headers, _, did = prepare(client)
-    for _ in range(3):
+    for _ in range(10):
         key = str(uuid4())
         assert start(client, headers, did, key).status_code == 202
         result = read(client, headers, did)
@@ -310,7 +345,7 @@ def test_failures_new_key_bounded_and_same_key_never_replayed(api_factory):
         assert result['extraction']['usage'] is None
         assert start(client, headers, did, key).json()['status'] == 'failed'
     assert start(client, headers, did).status_code == 429
-    assert len(api_factory.calls) == 3
+    assert len(api_factory.calls) == 10
 
 
 def test_revision_cap_rejects_without_truncation(api_factory):
