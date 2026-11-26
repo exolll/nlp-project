@@ -34,26 +34,31 @@ Copy-Item .env.example .env
 
 已有 `.env` 时，保留原文件并对照模板补齐字段。运行范围决定需要配置哪些服务。
 
-| 要测到哪一步 | 需要准备什么 |
-| --- | --- |
-| 上传、解析和预览 | 本地文件存储，可用下面的开发预览入口。 |
-| 真实需求提取、编辑和确认 | 另配 `DEEPSEEK_API_KEY`，模型及地址参照 [.env.example](.env.example)。 |
-| GitHub 搜索、证据检索和排名 | 另配 `GITHUB_TOKEN`、可访问的 MySQL 数据库和 `MYSQL_*` 参数。启用向量检索时，按模板配置 `EMBEDDING_*` 和 `SILICONFLOW_API_KEY`，并安装 ChromaDB。真实凭据只填本地 `.env`。 |
+# ProjectPilot 比赛版网页测试指南
 
-完整链路先创建与 `MYSQL_DATABASE` 一致的数据库，再从仓库根目录执行：
+## 首次准备
+
+用 PowerShell 进入比赛版 `slave` 分支的本地仓库根目录。首次运行时安装后端依赖并准备配置：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install chromadb
-.\.venv\Scripts\python.exe -m alembic -c backend/alembic.ini upgrade head
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e "./backend[test]"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-**终端一**从仓库根目录启动后端。开发预览使用本地文件存储。完整推荐功能是否可用取决于上表的服务配置。
+只测上传、解析和预览时，使用本地文件存储即可。测试真实需求提取时，在仓库根目录的 `.env` 配置 `DEEPSEEK_API_KEY`。测试完整搜索和推荐前，按 [比赛版 README](README.md) 配置 GitHub Token、MySQL 和向量检索服务。
+
+## 启动网页
+
+打开两个 PowerShell 窗口，均从仓库根目录开始。
+
+**窗口一启动后端**
 
 ```powershell
 .\.venv\Scripts\python.exe backend/dev_preview.py --test-data-directory ./data/local-preview
 ```
 
-**终端二**从仓库根目录进入前端后启动：
+**窗口二启动前端**
 
 ```powershell
 cd frontend
@@ -61,7 +66,7 @@ npm ci
 npm run dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。前端开发服务将 `/api` 请求转发到本地后端的 `8000` 端口。
+保持两个窗口运行，然后打开 [ProjectPilot 本地测试页面](http://127.0.0.1:5173/)。
 
 ## 用课程作业跑一次
 
