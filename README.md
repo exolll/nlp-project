@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/35452476/README.md)# ProjectPilot 比赛版
+# ProjectPilot 比赛版
 
 ProjectPilot 帮助学生把课程作业要求转成可核对的需求，再搜索 GitHub，找出与需求匹配的项目。用户可以上传 PDF 或 DOCX，也可以直接输入文字。**确认需求后才开始搜索**。最终结果展示仓库排名、逐项匹配判断和对应证据。
 
