@@ -260,3 +260,28 @@ def test_missing_requirements_still_fails():
     del raw['requirements']
     with pytest.raises(Exception):
         validate_extraction(raw, doc)
+def test_requirements_object_returned_without_its_wrapper_is_recovered():
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    flat = dict(raw['requirements'])
+    flat['requirement_items'] = raw['requirement_items']
+    req, items = validate_extraction(flat, doc)
+    assert len(items) == 1
+    assert req.required_features == ['实现检索']
+
+
+def test_items_named_items_inside_requirements_are_moved_out():
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    raw['requirements']['items'] = raw.pop('requirement_items')
+    req, items = validate_extraction(raw, doc)
+    assert len(items) == 1
+
+
+def test_absent_requirements_fields_still_fail():
+    import pytest
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    del raw['requirements']['missing_information']
+    with pytest.raises(Exception):
+        validate_extraction(raw, doc)

@@ -195,27 +195,36 @@ def validate_source_rules(requirements, items, document):
 
 
 _TOP_LEVEL_ALIASES = {'items': 'requirement_items', 'requirement': 'requirements'}
+_REQUIREMENT_KEYS = frozenset(RequirementJSON.model_fields)
 
 
 def normalize_model_payload(raw):
     """Recover from the model's mechanical envelope slips before schema validation.
 
-    Observed in real runs: a renamed top-level key ("items"), an extra commentary key,
-    or the item list nested inside "requirements". None of these change what the model
-    meant, so they are repaired here instead of failing the whole extraction. The schema
-    is closed: unknown keys are dropped, and a missing required key still fails.
+    Observed in real runs: a renamed top-level key ("items"), an extra commentary key, the
+    item list nested inside "requirements", and the requirements object returned without its
+    wrapper. None of these change what the model meant, so they are repaired here instead of
+    failing the whole extraction. The schema stays closed: unknown keys are dropped, a field
+    that is genuinely absent still fails, and nothing is invented.
     """
     if not isinstance(raw, dict):
         return raw
     data = {_TOP_LEVEL_ALIASES.get(key, key): value for key, value in raw.items()}
+
+    # The model returned the requirement fields at the top level, without the wrapper object.
+    if 'requirements' not in data and _REQUIREMENT_KEYS & set(data) - {'requirement_items'}:
+        nested = data.pop('requirement_items', None)
+        data = {'requirements': data, 'requirement_items': nested}
+
     requirements = data.get('requirements')
     if isinstance(requirements, dict):
         requirements = dict(requirements)
         nested = requirements.pop('requirement_items', None)
+        if nested is None:
+            nested = requirements.pop('items', None)
         if nested is not None and 'requirement_items' not in data:
             data['requirement_items'] = nested
-        allowed = set(RequirementJSON.model_fields)
-        data['requirements'] = {k: v for k, v in requirements.items() if k in allowed}
+        data['requirements'] = {k: v for k, v in requirements.items() if k in _REQUIREMENT_KEYS}
     return {key: data[key] for key in ('requirements', 'requirement_items') if key in data}
 
 
