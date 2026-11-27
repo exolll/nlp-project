@@ -73,10 +73,18 @@ def test_business_field_cannot_be_a_list_path(container):
 
 
 def test_prompt_delegates_unique_quote_positions_to_server():
-    from app.services.extraction_provider import SYSTEM_PROMPT
+    from app.services.extraction_provider import PROMPT_VERSION, SYSTEM_PROMPT
+    assert PROMPT_VERSION == 'requirements-v4'
     assert 'ALWAYS set start_offset' in SYSTEM_PROMPT
     assert 'end_offset to null' in SYSTEM_PROMPT
     assert 'NEVER field="required_features[0]"' in SYSTEM_PROMPT
+
+
+def test_prompt_requires_evidence_within_one_segment():
+    from app.services.extraction_provider import SYSTEM_PROMPT
+    assert 'fully contained in the ONE segment' in SYSTEM_PROMPT
+    assert 'never use normalized content or join adjacent segments' in SYSTEM_PROMPT
+    assert 'one quote per segment' in SYSTEM_PROMPT
 
 
 def test_resolved_original_unicode_offsets_and_uuid():
