@@ -26,6 +26,18 @@ apt-get update -qq
 apt-get install -y -qq python3.12 python3.12-venv python3.12-dev nginx git mysql-server \
     curl build-essential libssl-dev ca-certificates >/dev/null
 
+log "1b/9 swap (a 1-2 GiB instance OOMs while installing chromadb)"
+if ! swapon --show 2>/dev/null | grep -q .; then
+    if [[ ! -f /swapfile ]]; then
+        fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null
+    fi
+    swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+free -h
+
 log "2/9 Node.js 20 (needed by Vite 6)"
 if ! command -v node >/dev/null || [[ $(node -v | tr -d 'v' | cut -d. -f1) -lt 20 ]]; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
