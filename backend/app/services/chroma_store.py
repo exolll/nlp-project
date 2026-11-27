@@ -22,7 +22,14 @@ class ChromaStore:
     @classmethod
     def persistent(cls, path, **kwargs):
         import chromadb
-        client = chromadb.PersistentClient(path=str(path),
+        from pathlib import Path
+
+        # Chroma's Rust/SQLite backend cannot create the database file when the directory is
+        # missing: it fails with "unable to open database file" (code 14). A first run on a
+        # clean machine hit exactly that, so the directory is created here.
+        directory = Path(path)
+        directory.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(directory),
                                            settings=chromadb.Settings(anonymized_telemetry=False))
         return cls(client, **kwargs)
 
