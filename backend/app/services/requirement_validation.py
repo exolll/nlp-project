@@ -56,9 +56,18 @@ def values(requirements):
 
 
 def validate_coverage(requirements, items):
-    expected = values(requirements)
+    """One item per declared requirement value.
+
+    Descriptive fields (project_topic / project_description / project_type / domain) are
+    context for the reader, not search input: their items only carry provenance, so they sit
+    outside the one-to-one contract. A model that invents or omits such an item must not
+    discard an otherwise valid extraction.
+    """
+    expected = {path: pair for path, pair in values(requirements).items() if pair[0] not in BUSINESS_FIELDS[:4]}
     seen = set()
     for item in items:
+        if item.field in BUSINESS_FIELDS[:4]:
+            continue
         check(item.value_path not in seen)
         check(expected.get(item.value_path) == (item.field, item.text))
         check(bool(item.text.strip()))
@@ -67,13 +76,11 @@ def validate_coverage(requirements, items):
             check(item.modality in ('required', 'prohibited'))
         elif item.field.startswith('preferred_'):
             check(item.modality == 'preferred')
-        elif item.field in BUSINESS_FIELDS[:4]:
-            check(item.modality == 'informational')
         if item.operator == 'not_applicable':
             check(item.logic_group_id is None)
         else:
             check(bool(item.logic_group_id and item.logic_group_id.strip()))
-        if item.field in BUSINESS_FIELDS[4:] and NEGATION.search(item.text):
+        if NEGATION.search(item.text):
             check(item.modality == 'prohibited', '否定条件必须保留禁止语义。')
     check(set(expected) == seen, '所有实值字段必须有且仅有一个对应需求项。')
     groups = {}
