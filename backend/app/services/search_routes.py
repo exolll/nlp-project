@@ -386,6 +386,14 @@ def install_routes(app, state, owner, settings, factory=None):
             except Exception:
                 pass
         except Exception:
+            # Development aid: a run that dies inside the pipeline is otherwise invisible.
+            if settings.environment == 'development':
+                try:
+                    import traceback
+                    from pathlib import Path
+                    Path('pipeline-error.log').write_text(traceback.format_exc(), encoding='utf-8')
+                except Exception:
+                    pass
             # No replay, even if this separate annotation has an unknown write outcome.
             try:
                 outcome('interrupted', 'PIPELINE_INTERRUPTED')
