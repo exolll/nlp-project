@@ -10,6 +10,33 @@ import { renderToStaticMarkup } from 'react-dom/server'
 const require = createRequire(import.meta.url)
 const compile = source => `data:text/javascript;base64,${Buffer.from(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText).toString('base64')}`
 const searchUrl = compile(await readFile(new URL('./src/search.ts', import.meta.url), 'utf8'))
+const displayStatusUrl = compile(await readFile(new URL('./src/display/status.ts', import.meta.url), 'utf8'))
+const displayFormatUrl = compile(await readFile(new URL('./src/display/format.ts', import.meta.url), 'utf8'))
+const displayViewModelsUrl = compile((await readFile(new URL('./src/display/viewModels.ts', import.meta.url), 'utf8'))
+  .replace("from '../search'", `from '${searchUrl}'`)
+  .replace("from './status'", `from '${displayStatusUrl}'`)
+  .replace("from './format'", `from '${displayFormatUrl}'`))
+const reactUrl = name => pathToFileURL(require.resolve(name)).href
+let displayComponentSource = await readFile(new URL('./src/components/display.tsx', import.meta.url), 'utf8')
+for (const [spec, url] of Object.entries({ '../display/status': displayStatusUrl, '../display/viewModels': displayViewModelsUrl, react: reactUrl('react') })) {
+  displayComponentSource = displayComponentSource.replaceAll(`from '${spec}'`, `from '${url}'`).replaceAll(`from "${spec}"`, `from '${url}'`)
+}
+let displayComponentOutput = ts.transpileModule(displayComponentSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
+for (const name of ['react/jsx-runtime', 'react']) displayComponentOutput = displayComponentOutput.replaceAll(`from "${name}"`, `from '${reactUrl(name)}'`).replaceAll(`from '${name}'`, `from '${reactUrl(name)}'`)
+const displayComponentsUrl = `data:text/javascript;base64,${Buffer.from(displayComponentOutput).toString('base64')}`
+const panelApiUrl = compile('export class Failure extends Error { constructor(status) { super("failure"); this.status = status } } export function request() { throw Error("Unexpected request") }')
+async function loadSearchPanel() {
+  let source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
+  const imports = {
+    './search': searchUrl, './api': panelApiUrl,
+    './display/status': displayStatusUrl, './display/format': displayFormatUrl,
+    './display/viewModels': displayViewModelsUrl, './components/display': displayComponentsUrl,
+  }
+  for (const [spec, url] of Object.entries(imports)) source = source.replaceAll(`from '${spec}'`, `from '${url}'`)
+  let compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
+  for (const name of ['react/jsx-runtime', 'react']) compiled = compiled.replaceAll(`from "${name}"`, `from '${reactUrl(name)}'`).replaceAll(`from '${name}'`, `from '${reactUrl(name)}'`)
+  return import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+}
 const helpers = await import(searchUrl)
 const { searchBudget, searchPayload, reserveSearch, restoreSearch, shouldPollSearch, readSearch, evidenceLabel,
         deepPayload, reserveDeep, restoreDeep, deepPhase, shouldPollDeep, deepPhaseLabel,
@@ -321,19 +348,17 @@ test('ranking enforces hard-tier invariants, deterministic order and README chun
   await rejectReport({ ...unknownSourceChunk, ranking })
 })
 test('ranking UI shows three tiers, preferred mixed/null, scoped citations, limitations and exclusions', async () => {
-  let source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
-  source = source.replace("from './search'", `from '${searchUrl}'`).replace("from './api'", `from '${compile('export class Failure extends Error {} export function request() {}')}'`)
-  let compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
-  for (const name of ['react/jsx-runtime', 'react']) compiled = compiled.replaceAll(`from "${name}"`, `from '${pathToFileURL(require.resolve(name)).href}'`).replaceAll(`from '${name}'`, `from '${pathToFileURL(require.resolve(name)).href}'`)
-  const View = (await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)).DeepReviewReportView
+  const View = (await loadSearchPanel()).DeepReviewReportView
   const oldHtml = renderToStaticMarkup(React.createElement(View, { report: reviewReport }))
   assert.doesNotMatch(oldHtml, /class="ranking-view"/)
   const html = renderToStaticMarkup(React.createElement(View, { report: { ...reviewReport, ranking } }))
-  for (const text of ['推荐排名（确定性规则）', '符合要求', '待进一步核查', '存在硬约束冲突', '支持与反证并存',
+  for (const text of ['推荐结论与排名', '符合要求', '待进一步核查', '存在硬约束冲突', '支持与反证并存',
     '偏好需求：不适用', '有效证据 2 / 4', 'README 中有有效证据支持该必需需求。', conflictQuote, '仅基于已保存 README。',
-    '证据不足不等于项目不具备该功能。', 'REPOSITORY_OUTCOME_UNKNOWN', '第 3 名', 'https://github.com/example/supported']) assert.ok(html.includes(text), text)
+    '证据不足不等于项目不具备该功能。', 'REPOSITORY_OUTCOME_UNKNOWN', '第 3 名', 'https://github.com/example/supported',
+    '该理由未附可跳转的 README 引文', 'Chunk ID', '[0, 21)']) assert.ok(html.includes(text), text)
+  assert.ok(html.includes('必需项 · 需求 1 ·'))
+  assert.doesNotMatch(html, /需求 1（需求 1）/)
   assert.ok(html.indexOf('第 1 名') < html.indexOf('第 2 名') && html.indexOf('第 2 名') < html.indexOf('第 3 名'))
-  assert.match(html, /UTF-8 字节 \[0, 21\)/)
   assert.doesNotMatch(html, /满足率|综合得分|%/)
 })
 
@@ -369,11 +394,7 @@ test('scored ranking validates sort key and renders 100-point breakdown', async 
   wrongOrder.repositories[0].total_score = 10
   await assert.rejects(readDeepReview(async () => published(wrongOrder), 'task', 'revision', 'run', signal), /排名格式或引用归属无效/)
 
-  let source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
-  source = source.replace("from './search'", `from '${searchUrl}'`).replace("from './api'", `from '${compile('export class Failure extends Error {} export function request() {}')}'`)
-  let compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
-  for (const name of ['react/jsx-runtime', 'react']) compiled = compiled.replaceAll(`from "${name}"`, `from '${pathToFileURL(require.resolve(name)).href}'`).replaceAll(`from '${name}'`, `from '${pathToFileURL(require.resolve(name)).href}'`)
-  const View = (await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)).DeepReviewReportView
+  const View = (await loadSearchPanel()).DeepReviewReportView
   const html = renderToStaticMarkup(React.createElement(View, { report: { ...reviewReport, ranking: scored() } }))
   for (const text of ['90.00', '证据覆盖率 100%', 'Required Feature Match', 'Activity / Popularity', '硬约束层级']) assert.ok(html.includes(text), text)
   assert.ok(html.includes('80.00'))
@@ -430,11 +451,8 @@ test('actual API uses owner token and never retries an unknown POST; explicit re
 })
 
 test('initial rendered UI requires unchecked consent, disables POST, escapes revision text, and makes no requests', async () => {
-  let source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
-  source = source.replace("from './search'", `from '${searchUrl}'`).replace("from './api'", `from '${compile('export class Failure extends Error { constructor(status) { super("failure"); this.status = status } } export function request() { throw Error("Unexpected request") }')}'`)
-  let compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
-  for (const name of ['react/jsx-runtime', 'react']) compiled = compiled.replaceAll(`from "${name}"`, `from '${pathToFileURL(require.resolve(name)).href}'`).replaceAll(`from '${name}'`, `from '${pathToFileURL(require.resolve(name)).href}'`)
-  const Panel = (await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)).default
+  const source = await readFile(new URL('./src/SearchPanel.tsx', import.meta.url), 'utf8')
+  const Panel = (await loadSearchPanel()).default
   const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
   Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: memory() })
   try {

@@ -64,10 +64,13 @@ function EvidenceView({ evidence, document }: { evidence: Evidence; document: No
   </details>
 }
 
-export default function RequirementsPanel({ document, onProgress, onRunId, view = 'requirements', autoExtract = false, onAutoExtract, searchStage = 4 }: {
+export default function RequirementsPanel({ document, onProgress, onRunId, onContinue, onOpenDeep, onOpenResult, view = 'requirements', autoExtract = false, onAutoExtract, searchStage = 4 }: {
   document: NormalizedDocument
   onProgress?: () => void
   onRunId?: (runId: string) => void
+  onContinue?: () => void
+  onOpenDeep?: () => void
+  onOpenResult?: () => void
   view?: 'requirements' | 'search'
   autoExtract?: boolean
   onAutoExtract?: () => void
@@ -115,6 +118,7 @@ export default function RequirementsPanel({ document, onProgress, onRunId, view 
   const pending = isPending(job)
   const selected = revisions.find(revision => revision.revision_id === selectedId)
   const latest = !!selected && selected.revision_id === latestId
+  const latestNumber = revisions.find(revision => revision.revision_id === latestId)?.revision_number
   const cachedDraft = selected ? drafts[selected.revision_id] : undefined
   // History always displays the immutable server version, never a cached edit.
   const draft = selected ? latest ? cachedDraft ?? createDraft(selected) : createDraft(selected) : null
@@ -282,16 +286,26 @@ export default function RequirementsPanel({ document, onProgress, onRunId, view 
   }
   async function confirmRevision() {
     if (!selected || !draft || writeBlocked || dirty || unresolved || languagesIssue || selected.status === 'confirmed') return
+    let confirmed = false
     await mutate('confirm', async scope => {
       const result = await call<Revision>(scope, `/requirement-revisions/${encodeURIComponent(selected.revision_id)}/confirm`, 'POST')
       if (!active(scope)) return
       setRevisions(previous => mergeRevisions(previous, [result]))
       setDrafts(previous => ({ ...previous, [result.revision_id]: createDraft(result) }))
-      setNotice('此版本已确认。当前阶段仅确认需求，尚未搜索 GitHub。')
+      setNotice('此版本已确认，正在进入 GitHub 初筛；确认本身不会发起搜索。')
+      confirmed = true
     })
+    const scope = lifetime.current
+    if (confirmed && scope && active(scope)) onContinue?.()
   }
   function selectRevision(id: string) {
     setSelectedId(id)
+    const target = revisions.find(revision => revision.revision_id === id)
+    setNotice(target?.status === 'confirmed'
+      ? '正在查看已确认版本；确认记录不会被改写，也不能再次确认。'
+      : id === latestId
+        ? '正在查看最新版本；修改后需保存新版本，并单独确认。'
+        : '正在查看历史版本（只读）；后端只允许编辑和确认最新版本。')
     setGroupName('')
     setGroupOperator('')
     setTagEdit(null)
@@ -554,14 +568,15 @@ export default function RequirementsPanel({ document, onProgress, onRunId, view 
               {job && <dl><dt>模型</dt><dd>{job.model || '服务端未提供'}</dd><dt>提示词版本</dt><dd>{job.prompt_version || '服务端未提供'}</dd><dt>提取 ID</dt><dd>{job.extraction_id}</dd><dt>创建时间</dt><dd>{new Date(job.created_at).toLocaleString('zh-CN')}</dd></dl>}
               {job?.usage ? <><h4>服务端实际用量</h4><pre>{printable(job.usage)}</pre><p className="muted">仅展示返回的用量，不据此编造费用或性能数据。</p></> : job ? <p className="muted">服务端暂未提供用量数据。</p> : null}
             </details>
-            {selected?.status !== 'confirmed' && <p className="overview-gate">确认此版本后，才能在下一阶段单独授权 GitHub 搜索；确认本身不会发起搜索。</p>}
+            {latest && selected?.status !== 'confirmed' && <p className="overview-gate">确认此版本后，才能在下一阶段单独授权 GitHub 搜索；确认本身不会发起搜索。</p>}
+            {selected && !latest && <p className="overview-gate">历史版本只读。后端只允许确认最新版本，此版本不会被确认，也不会触发搜索。</p>}
           </div>
         </details>
       </aside>
       <div className="requirements-editor">
         {!selected || !draft ? <div className="requirements-empty card"><h3>{pending ? '正在提取结构化需求' : '还没有可展示的需求版本'}</h3><p>{pending ? '只在任务排队、提取或校验期间有限轮询。你可以稍后从历史任务恢复结果。' : '请先主动提取，或刷新恢复服务端已有版本。提取失败不会清除原输入材料。'}</p></div> : <>
           <div className="requirements-editor-scroll" ref={scrollRef} onScroll={onEditorScroll}>
-            {!latest && <p className="warning editor-banner">这是服务端历史版本，只读展示，不会被覆盖。请切换最新版本核对后编辑。</p>}
+            {!latest && <p className="warning editor-banner">这是服务端历史版本，只读展示，不会被覆盖，也不能保存或确认。请切换到最新版本{latestNumber ? `（版本 ${latestNumber}）` : ''}核对后编辑；后端只允许操作最新版本。</p>}
             {staleDraft && <details className="stale-draft" open><summary>已保留此版本未提交的本地编辑（仅供核对和复制）</summary><p className="muted">服务端已有更新版本，不能覆盖提交。以下不是已保存的历史内容；请与最新版本对照后重新编辑。</p><dl>{fields.map(field => <div key={field.key}><dt>{field.label}</dt><dd><pre>{staleDraft.requirements[field.key] === null ? '未提供（null）' : staleDraft.text[field.key] || (field.list ? '空列表 []' : '空文本')}</pre></dd></div>)}</dl><h4>本地条目逻辑</h4>{staleDraft.items.map((item, index) => <p key={index}>{item.value_path} · {item.text} · {item.modality} / {item.operator} / {item.logic_group_id ?? '无组'}</p>)}<h4>本地缺失信息</h4><pre>{staleDraft.missingText || '无'}</pre><p>本地歧义核对：{staleDraft.resolved ? '已勾选（未提交）' : '未勾选'}</p><h4>本地保存理由</h4><pre>{staleDraft.reason || '未填写'}</pre></details>}
             {latest && selected.status === 'confirmed' && <div className="confirmed-notice"><p>已确认版本不可覆写。可从此版本编辑并保存一个新的草稿，之后仍需单独确认。</p><button className="secondary" disabled={!!operation || pending || draft.editing} onClick={() => updateDraft(value => ({ ...value, editing: true }))}>{draft.editing ? '正在编辑新草稿（尚未保存）' : '新建修订草稿'}</button></div>}
             {groups.map(renderGroup)}
@@ -589,12 +604,12 @@ export default function RequirementsPanel({ document, onProgress, onRunId, view 
             {validationIssues.length > 0 && <div className="warning action-issues" role="alert"><strong>保存前请检查</strong><ul>{validationIssues.map(issue => <li key={issue}>{issue}</li>)}</ul></div>}
             <label className="reason-field" htmlFor="change-reason">保存理由 <span>保存新版本时必填</span></label>
             <textarea id="change-reason" className="reason-input" rows={2} maxLength={2000} value={draft.reason} disabled={!editable} placeholder="说明修改了什么、为何这样修改…" onChange={event => updateDraft(value => ({ ...value, reason: event.target.value }))} />
-            <div className="revision-buttons"><button className="primary" disabled={writeBlocked || !editable || validationIssues.length > 0 || !draft.reason.trim() || (!changed && selected.status !== 'confirmed')} onClick={() => void saveRevision()}>{operation === 'save' ? '正在保存…' : '保存为新版本'}</button><button className="secondary confirm-button" disabled={writeBlocked || dirty || unresolved || !!languagesIssue || selected.status === 'confirmed'} onClick={() => void confirmRevision()}>{operation === 'confirm' ? '正在确认…' : selected.status === 'confirmed' ? '此版本已确认' : '确认此版本'}</button></div>
-            <p className="muted action-help">{!latest ? '历史版本不可编辑或确认。' : dirty ? '有未保存的编辑，请先填写理由并保存新版本，再单独确认。' : unresolved ? '仍有未解决歧义，确认已禁用。' : languagesIssue ? languagesIssue : !synced ? '请先刷新核对状态，成功读取后才能提交。' : '保存不会自动确认或搜索 GitHub；切换版本保留本页编辑，离开前请先保存。'}</p>
+            <div className="revision-buttons"><button className="primary" disabled={writeBlocked || !editable || validationIssues.length > 0 || !draft.reason.trim() || (!changed && selected.status !== 'confirmed')} onClick={() => void saveRevision()}>{operation === 'save' ? '正在保存…' : !latest ? '历史版本不可保存' : '保存为新版本'}</button><button className="secondary confirm-button" disabled={writeBlocked || dirty || unresolved || !!languagesIssue || selected.status === 'confirmed'} onClick={() => void confirmRevision()}>{operation === 'confirm' ? '正在确认…' : selected.status === 'confirmed' ? '此版本已确认' : !latest ? '仅最新版本可确认' : '确认此版本'}</button>{selected.status === 'confirmed' && <button type="button" className="primary continue-button" disabled={!!operation || pending || !onContinue} onClick={() => onContinue?.()}>进入 GitHub 初筛 →</button>}{!latest && <button type="button" className="secondary history-return" disabled={!!operation || pending || !latestId} onClick={() => { if (latestId) selectRevision(latestId) }}>回到最新版本</button>}</div>
+            <p className="muted action-help">{!latest ? `历史版本只读：后端只允许编辑和确认最新版本${latestNumber ? `（版本 ${latestNumber}）` : ''}。如需采用此版本内容，请回到最新版本修改后保存并确认。` : dirty ? '有未保存的编辑，请先填写理由并保存新版本，再单独确认。' : unresolved ? '仍有未解决歧义，确认已禁用。' : languagesIssue ? languagesIssue : !synced ? '请先刷新核对状态，成功读取后才能提交。' : '保存不会自动确认或搜索 GitHub；切换版本保留本页编辑，离开前请先保存。'}</p>
           </div>
         </>}
       </div>
     </div>
-    {selected?.status === 'confirmed' && <SearchPanel key={`${document.task_id}.${selected.revision_id}`} taskId={document.task_id} revisionId={selected.revision_id} enabled={synced && !reading && !operation && !pending && !dirty && !draft?.editing} stage={searchStage} onProgress={onProgress} onRunId={onRunId} />}
+    {selected?.status === 'confirmed' && <SearchPanel key={`${document.task_id}.${selected.revision_id}`} taskId={document.task_id} revisionId={selected.revision_id} enabled={synced && !reading && !operation && !pending && !dirty && !draft?.editing} stage={searchStage} onProgress={onProgress} onRunId={onRunId} onOpenDeep={onOpenDeep} onOpenResult={onOpenResult} />}
   </section>
 }

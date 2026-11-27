@@ -424,6 +424,36 @@ function App() {
     navigate({ kind: 'task', taskId, stage: stage.index })
     commitQuiet(state => uiStore.patchTask(state, taskId, { stage: stage.index }))
   }
+  async function advanceToSearch() {
+    const taskId = activeRef.current
+    if (!taskId) return
+    const documentId = docRef.current?.task_id === taskId ? docRef.current.document_id : null
+    // 先刷新阶段信号：viewingStage 受 currentStage 限制，确认结果未进入信号前切换会被钳回当前阶段。
+    try { await refreshSignals(taskId, documentId) } catch { /* 读取失败不阻塞导航，视图仍按服务端信号钳制 */ }
+    if (taskId !== activeRef.current) return
+    navigate({ kind: 'task', taskId, stage: 4 }, true)
+    commitQuiet(state => uiStore.patchTask(state, taskId, { stage: 4 }))
+  }
+  async function openDeepStage() {
+    const taskId = activeRef.current
+    if (!taskId) return
+    const documentId = docRef.current?.task_id === taskId ? docRef.current.document_id : null
+    // 与初筛入口相同：先刷新只读阶段信号，避免刚发布的证据尚未进入信号时被钳回阶段 4。
+    try { await refreshSignals(taskId, documentId) } catch { /* 读取失败不阻塞导航，视图仍按服务端信号钳制 */ }
+    if (taskId !== activeRef.current) return
+    navigate({ kind: 'task', taskId, stage: 5 })
+    commitQuiet(state => uiStore.patchTask(state, taskId, { stage: 5 }))
+  }
+  async function openResultStage() {
+    const taskId = activeRef.current
+    if (!taskId) return
+    const documentId = docRef.current?.task_id === taskId ? docRef.current.document_id : null
+    // 阶段 6 由 rankingAvailable 门控：先刷新只读信号，排名尚未进入信号时切换会被钳回阶段 5。
+    try { await refreshSignals(taskId, documentId) } catch { /* 读取失败不阻塞导航，视图仍按服务端信号钳制 */ }
+    if (taskId !== activeRef.current) return
+    navigate({ kind: 'task', taskId, stage: 6 })
+    commitQuiet(state => uiStore.patchTask(state, taskId, { stage: 6 }))
+  }
   function openSettings(target: router.SettingsTab) {
     if (routeRef.current.kind !== 'settings') settingsReturn.current = routeRef.current
     navigate({ kind: 'settings', tab: target })
@@ -600,6 +630,9 @@ function App() {
               onAutoExtract={() => setAutoExtractDoc(null)}
               onProgress={pulse}
               onRunId={handleRunId}
+              onContinue={advanceToSearch}
+              onOpenDeep={openDeepStage}
+              onOpenResult={openResultStage}
             />
           : <section className="card stage-empty">
               <div className="card-title"><div><span className="section-index">02 / REQUIREMENTS</span><h2>需求提取与确认</h2></div></div>
