@@ -188,7 +188,7 @@ try {
     if (location.origin === ${JSON.stringify(`http://127.0.0.1:${vitePort}`)}) {
       sessionStorage.setItem('projectpilot.session', JSON.stringify({ access_token: 'offline-demo-token', expires_at: '2099-01-01T00:00:00Z' }));
       sessionStorage.setItem('projectpilot.search.${taskId}.${revisionId}', JSON.stringify({ key: '77777777-7777-4777-8777-777777777777',
-        payload: { revision_id: '${revisionId}', consent: true, budget: { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } }, run_id: '${runId}' }));
+        payload: { revision_id: '${revisionId}', consent: true, budget: { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } }, run_id: '${runId}' }));
     }
   `
   await command('Page.addScriptToEvaluateOnNewDocument', { source: injection })

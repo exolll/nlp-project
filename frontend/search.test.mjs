@@ -102,8 +102,8 @@ const reviewOperation = { operation_id: 'operation', status: 'running', persiste
   deadline: '2026-01-01T00:10:00Z', report_key: null, report_hash: null, error_code: null, report: null }
 
 test('explicit payload fixes the confirmed revision and caps every external budget', () => {
-  assert.deepEqual(searchPayload('revision'), { revision_id: 'revision', consent: true, budget: { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } })
-  assert.ok(searchBudget.github_requests >= searchBudget.search_requests + 2 * searchBudget.readme_candidates)
+  assert.deepEqual(searchPayload('revision'), { revision_id: 'revision', consent: true, budget: { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } })
+  assert.equal(searchBudget.github_requests, searchBudget.search_requests + 2 * searchBudget.readme_candidates)
 })
 test('unknown submission, duplicate clicks and remount reuse the same durable UUID and exact payload', () => {
   const storage = memory()

@@ -1,4 +1,4 @@
-﻿import type { ApiError, NormalizedDocument } from './api'
+import type { ApiError, NormalizedDocument } from './api'
 
 export type SourceKind = 'assignment_document' | 'user_primary_text' | 'user_supplement' | 'user_revision'
 export interface UncertainItem { field: string; requirement_item_ids: string[]; reason: string; question: string; evidence_ids: string[] }
@@ -30,8 +30,6 @@ export type ItemEdit = Omit<RequirementItem, 'requirement_item_id'> & { requirem
 export interface ExtractionJob {
   extraction_id: string; status: 'queued' | 'extracting' | 'validating' | 'completed' | 'failed'
   error: ApiError | null; model: string; prompt_version: string; usage: Record<string, unknown> | null; created_at: string
-  // Sanitised validator location; present only when the model output failed validation.
-  diagnostic?: { validator: string; field: string | null } | null
 }
 export interface Revision {
   revision_id: string; task_id: string; revision_number: number; parent_revision_id: string | null
@@ -71,6 +69,17 @@ export interface Draft {
 }
 export const lines = (value: string): string[] => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
 export const isPending = (job: ExtractionJob | null): boolean => !!job && ['queued', 'extracting', 'validating'].includes(job.status)
+// Empty arrays are an explicit "none required"; only null means the field was not provided.
+export function fieldProvided(requirements: RequirementJSON, key: RequirementField): boolean {
+  const value = requirements[key]
+  if (value === null) return false
+  return Array.isArray(value) || value.trim().length > 0
+}
+export function completeness(requirements: RequirementJSON): { filled: number; total: number; percent: number } {
+  const total = fields.length
+  const filled = fields.filter(({ key }) => fieldProvided(requirements, key)).length
+  return { filled, total, percent: total ? Math.round(filled / total * 100) : 0 }
+}
 export function createDraft(revision: Revision): Draft {
   return {
     requirements: structuredClone(revision.requirements), items: structuredClone(revision.requirement_items),
@@ -127,6 +136,12 @@ export function updateField(draft: Draft, field: RequirementField, text: string,
 }
 function comparableItems(items: ItemEdit[]): string {
   return JSON.stringify([...items].sort((a, b) => a.field.localeCompare(b.field) || a.value_path.localeCompare(b.value_path) || (a.requirement_item_id ?? '').localeCompare(b.requirement_item_id ?? '')))
+}
+export function latestProjectTopic(revisions: Revision[], latestRevisionId: string | null): string | null {
+  const latest = revisions.find(revision => revision.revision_id === latestRevisionId)
+    ?? [...revisions].sort((a, b) => b.revision_number - a.revision_number)[0]
+  const topic = latest?.requirements.project_topic
+  return typeof topic === 'string' && topic.trim() ? topic.trim() : null
 }
 export function meaningChanged(draft: Draft, revision: Revision): boolean {
   return fields.some(({ key }) => JSON.stringify(draft.requirements[key]) !== JSON.stringify(revision.requirements[key])) || comparableItems(draft.items) !== comparableItems(revision.requirement_items)
