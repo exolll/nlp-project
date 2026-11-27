@@ -212,12 +212,25 @@ export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: s
   const deepResend = !!deepAttempt && (phase === 'not_started' || phase === 'interrupted' || (phase === 'running' && stalled))
   const deepActive = !busy && enabled && !!attempt?.run_id && !deepStorageError && snapshotsReady && phase !== 'ready' && phase !== 'failed' && phase !== 'blocked'
   const deepSendDisabled = !deepActive || (deepAttempt ? !deepResend : !deepConsent)
+  // A terminal run (interrupted/failed) keeps its idempotency key, so the backend would only
+  // replay the stored record. Offer an explicit reset so a new run can be started without
+  // clearing session storage by hand.
+  const finished = run?.status === 'interrupted' || run?.status === 'failed'
+  function startNewRun() {
+    sessionStorage.removeItem(storageKey)
+    attemptRef.current = null
+    setAttempt(null)
+    setRun(null)
+    setConsent(false)
+    setError('')
+    setNotice('已清除上次运行记录。请重新勾选授权，再开始新的一次搜索。')
+  }
   return <section className="search-panel" aria-labelledby="search-title">
     <div className="card-title"><div><span className="section-index">04 / SEARCH & EVIDENCE</span><h2 id="search-title">候选搜索与 README 证据</h2></div><span className="badge">{run?.status ?? '等待授权'}</span></div>
     <p>绑定已确认版本：<code>{revisionId}</code>。只搜索这个已保存版本，不包含本地未保存编辑。</p>
     <div className="extraction-consent"><div><strong>明确授权一次真实外部调用</strong><p>点击下方按钮会向后端 POST 搜索运行，调用真实模型服务与 GitHub，可能产生费用并发送需求。测试必须拦截 API 使用模拟响应；刷新只执行 GET。</p><p>固定预算上限：模型 1 次、搜索 9 次（每次最多 5 条、1 页）、README 5 个候选；GitHub 共 20 次（含 commit / README 请求）。</p><label className="resolution-check"><input type="checkbox" checked={consent} disabled={busy || !!attempt?.run_id || !!storageError || !enabled} onChange={event => setConsent(event.target.checked)} />我同意将此已确认版本用于上述外部调用与预算</label></div></div>
     {!enabled && <p className="warning">请先保存并确认当前编辑，或退出编辑后选择已确认版本。搜索不会使用未保存内容。</p>}
-    <div className="requirement-actions"><button className="primary" disabled={!enabled || !consent || busy || !!storageError || !!attempt?.run_id} onClick={() => void start()}>{busy && !run ? '正在提交…' : attempt ? '显式重试同一次搜索（沿用 UUID）' : '按此预算开始搜索'}</button><button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新搜索与证据（仅 GET）</button></div>
+    <div className="requirement-actions"><button className="primary" disabled={!enabled || !consent || busy || !!storageError || !!attempt?.run_id} onClick={() => void start()}>{busy && !run ? '正在提交…' : attempt ? '显式重试同一次搜索（沿用 UUID）' : '按此预算开始搜索'}</button><button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新搜索与证据（仅 GET）</button>{finished && <button className="secondary" disabled={busy} onClick={startNewRun}>开始新的一次搜索（清除上次运行）</button>}</div>
     <div aria-live="polite"><p>{busy && <span className="spinner" />}{notice}</p>{storageError && <p className="warning" role="alert">{storageError}</p>}{error && <p className="error" role="alert">{error}</p>}{attempt && !attempt.run_id && <p className="warning">本次提交结果未知。没有运行 ID 时无法查询；仅允许按钮重发相同载荷和幂等键，不会另建请求。</p>}</div>
     {run && <><dl className="search-status"><dt>运行 ID</dt><dd>{run.run_id}</dd><dt>流水线</dt><dd>{run.pipeline_status}</dd><dt>规划 / 搜索 / 证据发布</dt><dd>{run.plan_status ?? '未提供'} / {run.search_status ?? '未提供'} / {run.evidence_status ?? 'not_ready'}</dd><dt>外部派发关闭</dt><dd>{run.dispatch_closed === undefined ? '未提供' : run.dispatch_closed ? '是' : '否'}</dd></dl>{run.search_status === 'partial' && <p className="warning">仅有部分采集结果；不丢弃已保存的 README 证据，也不把缺失视为不满足。</p>}{[run.error_code, run.pipeline_error_code, ...(run.search_stop_reasons ?? [])].filter(Boolean).map((code, i) => <p className="warning" key={i}>{code}</p>)}{run.operation_failures?.map((failure, i) => <p className="warning" key={i}>{failure.operation} · {failure.status} · {failure.error_code}</p>)}<h3>候选与 README 采集状态</h3>{!run.candidates?.length && <p className="muted">尚无候选记录，不代表需求不满足。</p>}<ul>{run.candidates?.map(candidate => <li key={candidate.repository_id}>仓库 ID {candidate.repository_id} · README：{candidate.collection_status ?? '未提供'}</li>)}</ul></>}
     <h3>逐需求证据核对</h3><p className="warning">字面提及不是满足结论；否定语义、禁止约束及 ALL / ANY 均需人工核对。未找到提及也不代表不满足。</p>
