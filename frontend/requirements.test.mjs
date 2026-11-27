@@ -6,7 +6,7 @@ import ts from 'typescript'
 // Exercise the actual pure TS helpers without adding a test dependency or emitting files.
 const source = await readFile(new URL('./src/requirements.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
-const { reconcileItems, createDraft, updateField, revisionPayload, contentChanged, meaningChanged, draftIssues, languageGroupIssue, evidenceSlice, settleAttempt, mayStartExtraction } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { reconcileItems, createDraft, updateField, revisionPayload, contentChanged, meaningChanged, draftIssues, languageGroupIssue, evidenceSlice, settleAttempt, mayStartExtraction, completeness, fieldProvided } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const item = (text, index, extra = {}) => ({
   requirement_item_id: `item-${index}`, field: 'programming_languages', value_path: `programming_languages[${index}]`, text,
   modality: 'required', source_kind: 'assignment_document', evidence_ids: [`evidence-${index}`], logic_group_id: 'languages', operator: 'ANY', supersedes_item_id: null, ...extra,
@@ -113,6 +113,15 @@ test('server validation constraints and deleted uncertainty links are explained 
   assert.ok(draftIssues(incompatible, revision).some(issue => issue.includes('必须')))
 })
 
+test('completeness counts provided fields and keeps explicit empty lists distinct from null', () => {
+  assert.deepEqual(completeness(revision.requirements), { filled: 3, total: 9, percent: 33 })
+  assert.equal(fieldProvided(revision.requirements, 'required_features'), true)
+  assert.equal(fieldProvided(revision.requirements, 'programming_languages'), true)
+  assert.equal(fieldProvided(revision.requirements, 'project_description'), false)
+  assert.equal(fieldProvided({ ...revision.requirements, project_description: '   ' }, 'project_description'), false)
+  assert.deepEqual(completeness({ ...revision.requirements, project_topic: null, required_features: null, programming_languages: null }), { filled: 0, total: 9, percent: 0 })
+  assert.deepEqual(completeness({ ...revision.requirements, programming_languages: [] }), { filled: 3, total: 9, percent: 33 })
+})
 test('evidence uses original Unicode code points, not UTF-16 or normalized text', () => {
   const document = { normalized_text: 'wrong text', source_segments: [{ segment_id: 'segment-1', original_content: '前😀Python后', content: 'different normalized content' }] }
   const verified = evidenceSlice(evidence, document)

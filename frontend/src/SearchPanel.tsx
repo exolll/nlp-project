@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { Failure, request } from './api'
-import { deepPhase, deepPhaseLabel, deepReviewPayload, deepReviewStatusLabel, readDeepReview, readSearch, reserveDeep, reserveSearch, restoreDeep, restoreSearch, shouldPollDeep, shouldPollDeepReview, shouldPollSearch, evidenceLabel, validateDeepReview } from './search'
+import { deepPhase, deepPhaseLabel, deepReviewPayload, deepReviewStatusLabel, readDeepReview, readSearch, reserveDeep, reserveSearch, restoreDeep, restoreSearch, searchBudget, shouldPollDeep, shouldPollDeepReview, shouldPollSearch, evidenceLabel, validateDeepReview } from './search'
 import type { DeepAttempt, DeepReport, DeepReviewOperation, DeepReviewReport as ReviewReport, RetrievalBundle, RetrievalChunk, SearchAttempt, SearchEvidence, SearchRun } from './search'
 
-export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: string; revisionId: string; enabled: boolean }) {
+const runStateLabels: Record<string, string> = {
+  reserved: '已受理', queued: '排队中', running: '进行中', completed: '已完成',
+  partial: '部分完成', failed: '失败', interrupted: '已中断', not_started: '未开始',
+}
+
+export default function SearchPanel({ taskId, revisionId, enabled, stage = 4, onProgress, onRunId }: {
+  taskId: string
+  revisionId: string
+  enabled: boolean
+  stage?: 4 | 5 | 6
+  onProgress?: () => void
+  onRunId?: (runId: string) => void
+}) {
   const storageKey = `projectpilot.search.${taskId}.${revisionId}`
   const deepKey = (runId: string) => `projectpilot.deep.${taskId}.${revisionId}.${runId}`
   const [initial] = useState(() => {
@@ -41,6 +53,18 @@ export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: s
   const [reviewBusy, setReviewBusy] = useState(false)
   const [reviewStalled, setReviewStalled] = useState(false)
   const [stalled, setStalled] = useState(false)
+  const [activeSection, setActiveSection] = useState<'run' | 'evidence' | 'retrieval'>('run')
+  const [authOpenOverride, setAuthOpenOverride] = useState<boolean | null>(null)
+  const sectionScrollRef = useRef<HTMLDivElement | null>(null)
+  const sectionRefs = useRef<Record<string, HTMLElement | null>>({})
+  const [deepSection, setDeepSection] = useState<'check' | 'review' | 'trace'>('check')
+  const [deepAuthOpenOverride, setDeepAuthOpenOverride] = useState<boolean | null>(null)
+  const [reviewAuthOpenOverride, setReviewAuthOpenOverride] = useState<boolean | null>(null)
+  const deepScrollRef = useRef<HTMLDivElement | null>(null)
+  const deepSectionRefs = useRef<Record<string, HTMLElement | null>>({})
+  const [resultSection, setResultSection] = useState<'ranking' | 'trace'>('ranking')
+  const resultScrollRef = useRef<HTMLDivElement | null>(null)
+  const resultSectionRefs = useRef<Record<string, HTMLElement | null>>({})
   const scopeRef = useRef<AbortController | null>(null)
   const lock = useRef(false)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -158,6 +182,12 @@ export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: s
     return () => { scope.abort(); cancelTimer(); cancelReviewTimer() }
     // Parent keys by task and immutable revision, so no requests or state cross tasks.
   }, [taskId, revisionId])
+  // 向外层外壳报告真实运行标识与阶段信号；只在这一层能拿到 run / review 的真实状态。
+  useEffect(() => { if (attempt?.run_id) onRunId?.(attempt.run_id) }, [attempt?.run_id])
+  const progressKey = run
+    ? `${run.status}|${run.evidence_status ?? ''}|${run.retrieval_status ?? ''}|${run.deep_check?.status ?? ''}|${run.deep_check?.published ?? ''}`
+    : ''
+  useEffect(() => { onProgress?.() }, [progressKey, review?.status, !!review?.report])
   async function start() {
     const scope = scopeRef.current
     if (!scope || !active(scope) || lock.current || !enabled || !consent || storageError || attemptRef.current?.run_id) return
@@ -212,44 +242,333 @@ export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: s
   const deepResend = !!deepAttempt && (phase === 'not_started' || phase === 'interrupted' || (phase === 'running' && stalled))
   const deepActive = !busy && enabled && !!attempt?.run_id && !deepStorageError && snapshotsReady && phase !== 'ready' && phase !== 'failed' && phase !== 'blocked'
   const deepSendDisabled = !deepActive || (deepAttempt ? !deepResend : !deepConsent)
-  return <section className="search-panel" aria-labelledby="search-title">
-    <div className="card-title"><div><span className="section-index">04 / SEARCH & EVIDENCE</span><h2 id="search-title">候选搜索与 README 证据</h2></div><span className="badge">{run?.status ?? '等待授权'}</span></div>
-    <p>绑定已确认版本：<code>{revisionId}</code>。只搜索这个已保存版本，不包含本地未保存编辑。</p>
-    <div className="extraction-consent"><div><strong>明确授权一次真实外部调用</strong><p>点击下方按钮会向后端 POST 搜索运行，调用真实模型服务与 GitHub，可能产生费用并发送需求。测试必须拦截 API 使用模拟响应；刷新只执行 GET。</p><p>固定预算上限：模型 1 次、搜索 5 次（每次最多 5 条、1 页）、README 5 个候选；GitHub 共 15 次（含 commit / README 请求）。</p><label className="resolution-check"><input type="checkbox" checked={consent} disabled={busy || !!attempt?.run_id || !!storageError || !enabled} onChange={event => setConsent(event.target.checked)} />我同意将此已确认版本用于上述外部调用与预算</label></div></div>
-    {!enabled && <p className="warning">请先保存并确认当前编辑，或退出编辑后选择已确认版本。搜索不会使用未保存内容。</p>}
-    <div className="requirement-actions"><button className="primary" disabled={!enabled || !consent || busy || !!storageError || !!attempt?.run_id} onClick={() => void start()}>{busy && !run ? '正在提交…' : attempt ? '显式重试同一次搜索（沿用 UUID）' : '按此预算开始搜索'}</button><button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新搜索与证据（仅 GET）</button></div>
-    <div aria-live="polite"><p>{busy && <span className="spinner" />}{notice}</p>{storageError && <p className="warning" role="alert">{storageError}</p>}{error && <p className="error" role="alert">{error}</p>}{attempt && !attempt.run_id && <p className="warning">本次提交结果未知。没有运行 ID 时无法查询；仅允许按钮重发相同载荷和幂等键，不会另建请求。</p>}</div>
-    {run && <><dl className="search-status"><dt>运行 ID</dt><dd>{run.run_id}</dd><dt>流水线</dt><dd>{run.pipeline_status}</dd><dt>规划 / 搜索 / 证据发布</dt><dd>{run.plan_status ?? '未提供'} / {run.search_status ?? '未提供'} / {run.evidence_status ?? 'not_ready'}</dd><dt>外部派发关闭</dt><dd>{run.dispatch_closed === undefined ? '未提供' : run.dispatch_closed ? '是' : '否'}</dd></dl>{run.search_status === 'partial' && <p className="warning">仅有部分采集结果；不丢弃已保存的 README 证据，也不把缺失视为不满足。</p>}{[run.error_code, run.pipeline_error_code, ...(run.search_stop_reasons ?? [])].filter(Boolean).map((code, i) => <p className="warning" key={i}>{code}</p>)}{run.operation_failures?.map((failure, i) => <p className="warning" key={i}>{failure.operation} · {failure.status} · {failure.error_code}</p>)}<h3>候选与 README 采集状态</h3>{!run.candidates?.length && <p className="muted">尚无候选记录，不代表需求不满足。</p>}<ul>{run.candidates?.map(candidate => <li key={candidate.repository_id}>仓库 ID {candidate.repository_id} · README：{candidate.collection_status ?? '未提供'}</li>)}</ul></>}
-    <h3>逐需求证据核对</h3><p className="warning">字面提及不是满足结论；否定语义、禁止约束及 ALL / ANY 均需人工核对。未找到提及也不代表不满足。</p>
-    {!evidence ? <p className="muted">证据报告尚未读取或尚未发布。候选采集完成不等于证据已发布；可稍后只读刷新。</p> : <><p>{evidence.warning}</p>{evidence.candidates.length === 0 && <p>已发布报告没有候选。</p>}{evidence.candidates.map(candidate => <article className="search-candidate" key={candidate.repository_id}><h4>仓库 ID {candidate.repository_id} · README {candidate.availability}</h4>{candidate.source ? <details><summary>精确快照来源</summary><dl>{Object.entries(candidate.source).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></details> : <p>无已保存快照，无法确认。</p>}{evidence.requirement_items.map(requirement => {
-      const item = candidate.items.find(value => value.requirement_item_id === requirement.requirement_item_id)
-      return <details className="requirement-evidence" key={requirement.requirement_item_id}><summary>{requirement.text} · {evidenceLabel(item?.status ?? 'unconfirmed')}</summary><p>{requirement.requirement_item_id} · {requirement.modality} · {requirement.operator} · 逻辑组 {requirement.logic_group_id ?? '无'}</p>{item?.quotes.length ? item.quotes.map((quote, i) => <div key={i}><small>README 行 {quote.line_start}–{quote.line_end} · UTF-8 字节 [{quote.byte_start}, {quote.byte_end})</small><pre className="source-quote">{quote.text}</pre></div>) : <p>无精确引文，尚未确认。</p>}</details>
-    })}</article>)}</>}
-    <h3>05 / 检索证据（README 片段）</h3>
-    <p className="warning">检索只表示“相关”，不代表功能已满足；不显示满足百分比。所有片段都来自已保存的 README 快照。</p>
+  const searchAuthNeedsAttention = !attempt?.run_id || !!error || !!storageError
+  const searchAuthOpen = authOpenOverride ?? searchAuthNeedsAttention
+  const deepAuthNeedsAttention = !attempt?.run_id || !!deepError || !!deepStorageError || stalled
+  const deepAuthOpen = deepAuthOpenOverride ?? (deepAuthNeedsAttention || (!deepAttempt && !report))
+  const reviewAuthNeedsAttention = !attempt?.run_id || !!reviewError || reviewStalled
+  const reviewAuthOpen = reviewAuthOpenOverride ?? (reviewAuthNeedsAttention || (!review && !!report && reviewReady))
+  const ranking = review?.report?.ranking ?? null
+  const recommendationCounts = ranking ? ranking.repositories.reduce((counts, row) => {
+    counts[row.recommendation.status] += 1
+    return counts
+  }, { recommended: 0, needs_review: 0, not_recommended: 0 }) : null
+  function scrollToSection(key: 'run' | 'evidence' | 'retrieval') {
+    setActiveSection(key)
+    const scroller = sectionScrollRef.current
+    const target = sectionRefs.current[key]
+    if (!scroller || !target) return
+    scroller.scrollTo({ top: Math.max(target.offsetTop - 4, 0), behavior: 'smooth' })
+  }
+  function onSectionScroll() {
+    const scroller = sectionScrollRef.current
+    if (!scroller) return
+    const top = scroller.scrollTop + 40
+    let current: 'run' | 'evidence' | 'retrieval' = 'run'
+    for (const key of ['run', 'evidence', 'retrieval'] as const) {
+      const node = sectionRefs.current[key]
+      if (node && node.offsetTop <= top) current = key
+    }
+    setActiveSection(value => value === current ? value : current)
+  }
+  function scrollToDeepSection(key: 'check' | 'review' | 'trace') {
+    setDeepSection(key)
+    const scroller = deepScrollRef.current
+    const target = deepSectionRefs.current[key]
+    if (!scroller || !target) return
+    scroller.scrollTo({ top: Math.max(target.offsetTop - 4, 0), behavior: 'smooth' })
+  }
+  function onDeepScroll() {
+    const scroller = deepScrollRef.current
+    if (!scroller) return
+    const top = scroller.scrollTop + 40
+    let current: 'check' | 'review' | 'trace' = 'check'
+    for (const key of ['check', 'review', 'trace'] as const) {
+      const node = deepSectionRefs.current[key]
+      if (node && node.offsetTop <= top) current = key
+    }
+    // 末节高度可能小于视口，滚到底时无法越过阈值，直接标为末节。
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) current = 'trace'
+    setDeepSection(value => value === current ? value : current)
+  }
+  function scrollToResultSection(key: 'ranking' | 'trace') {
+    setResultSection(key)
+    const scroller = resultScrollRef.current
+    const target = resultSectionRefs.current[key]
+    if (!scroller || !target) return
+    scroller.scrollTo({ top: Math.max(target.offsetTop - 4, 0), behavior: 'smooth' })
+  }
+  function onResultScroll() {
+    const scroller = resultScrollRef.current
+    if (!scroller) return
+    const top = scroller.scrollTop + 40
+    let current: 'ranking' | 'trace' = 'ranking'
+    for (const key of ['ranking', 'trace'] as const) {
+      const node = resultSectionRefs.current[key]
+      if (node && node.offsetTop <= top) current = key
+    }
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) current = 'trace'
+    setResultSection(value => value === current ? value : current)
+  }
+  return <section className="search-panel" aria-label="搜索、深度筛选与结果" data-stage={stage}>
+    <div className="search-stage search-workspace-stage" hidden={stage !== 4}>
+      <div className="search-workspace screen-workspace">
+        <aside className="search-overview screen-overview card" aria-label="搜索运行概览">
+          <header className="overview-head">
+            <span className="section-index">04 / GITHUB SCREEN</span>
+            <h2 id="search-title">GitHub 初筛</h2>
+            <p className="overview-subtitle">只搜索已确认并保存的版本；授权一次运行，刷新只读不重复调用。</p>
+            <div className="overview-badges">
+              <span className={`badge ${run?.status === 'completed' ? 'success' : ''}`}>{run ? runStateLabels[run.status] ?? run.status : '等待授权'}</span>
+              {attempt?.run_id && <span className="badge info">运行已受理</span>}
+              {evidence && <span className="badge success">证据已发布</span>}
+            </div>
+          </header>
+          <div className="search-binding">
+            <span>绑定已确认版本</span>
+            <code title={revisionId}>{revisionId}</code>
+          </div>
+          {run ? <dl className="search-overview-status">
+            <div><dt>流水线</dt><dd>{runStateLabels[run.pipeline_status] ?? run.pipeline_status}</dd></div>
+            <div><dt>规划 / 搜索</dt><dd>{run.plan_status ?? '未提供'} / {run.search_status ?? '未提供'}</dd></div>
+            <div><dt>证据发布</dt><dd>{run.evidence_status ?? 'not_ready'}</dd></div>
+            <div><dt>候选仓库</dt><dd>{run.candidates?.length ?? 0} 个</dd></div>
+            <div><dt>运行 ID</dt><dd><code>{run.run_id}</code></dd></div>
+          </dl> : <p className="overview-empty">还没有搜索运行；确认需求本身不会自动搜索。</p>}
+          <div className="search-budget">固定预算 · 模型 {searchBudget.model_calls} 次 · 搜索 {searchBudget.search_requests} 次 · GitHub {searchBudget.github_requests} 次 · README {searchBudget.readme_candidates} 个</div>
+          <nav className="group-nav" aria-label="初筛分区">
+            <button type="button" className={activeSection === 'run' ? 'active' : ''} onClick={() => scrollToSection('run')}>
+              <span className="nav-index">01</span><span className="nav-label">运行与候选</span><span className="nav-status">{run ? runStateLabels[run.pipeline_status] ?? run.pipeline_status : '未开始'}</span>
+            </button>
+            <button type="button" className={activeSection === 'evidence' ? 'active' : ''} onClick={() => scrollToSection('evidence')}>
+              <span className="nav-index">02</span><span className="nav-label">逐需求证据</span><span className="nav-status">{evidence ? `${evidence.requirement_items.length} 条需求` : '未发布'}</span>
+            </button>
+            <button type="button" className={activeSection === 'retrieval' ? 'active' : ''} onClick={() => scrollToSection('retrieval')}>
+              <span className="nav-index">03</span><span className="nav-label">检索片段</span><span className="nav-status">{retrieval ? `${retrieval.candidates.length} 个仓库` : '未生成'}</span>
+            </button>
+          </nav>
+          <details className="overview-extraction" open={searchAuthOpen} onToggle={event => { if (event.currentTarget.open !== searchAuthOpen) setAuthOpenOverride(event.currentTarget.open) }}>
+            <summary>授权与运行{run ? ` · ${runStateLabels[run.status] ?? run.status}` : ''}</summary>
+            <div className="overview-extraction-body">
+              <div className="search-auth-consent">
+                <strong>明确授权一次真实外部调用</strong>
+                <p>点击开始会向后端 POST 搜索运行，调用真实模型服务与 GitHub，可能产生费用并发送需求。刷新只执行 GET；测试必须拦截 API 或使用本地 Mock。</p>
+                <p>上限：模型 {searchBudget.model_calls} 次 · 搜索 {searchBudget.search_requests} 次（每次最多 {searchBudget.per_page} 条、{searchBudget.max_pages} 页）· README {searchBudget.readme_candidates} 个候选 · GitHub 共 {searchBudget.github_requests} 次（含 commit / README 请求）。</p>
+                <label className="resolution-check"><input type="checkbox" checked={consent} disabled={busy || !!attempt?.run_id || !!storageError || !enabled} onChange={event => setConsent(event.target.checked)} />我同意将此已确认版本用于上述外部调用与预算</label>
+              </div>
+              <div className="overview-extract-actions">
+                <button className="primary" disabled={!enabled || !consent || busy || !!storageError || !!attempt?.run_id} onClick={() => void start()}>{busy && !run ? '正在提交…' : attempt ? '显式重试同一次搜索（沿用 UUID）' : '按此预算开始搜索'}</button>
+                <button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新（仅 GET）</button>
+              </div>
+            </div>
+          </details>
+          <div className="overview-feedback" aria-live="polite">
+            <p>{busy && <span className="spinner" />}{notice}</p>
+            {storageError && <p className="warning" role="alert">{storageError}</p>}
+            {error && <p className="error" role="alert">{error}</p>}
+          </div>
+          {attempt && !attempt.run_id && <p className="warning overview-warning">本次提交结果未知。没有运行 ID 时无法查询；仅允许按钮重发相同载荷和幂等键，不会另建请求。</p>}
+          {!enabled && <p className="warning overview-warning">请先保存并确认当前编辑，或退出编辑后选择已确认版本。搜索不会使用未保存内容。</p>}
+        </aside>
+        <div className="search-editor screen-editor">
+          <div className="search-editor-scroll screen-editor-scroll" ref={sectionScrollRef} onScroll={onSectionScroll}>
+            <section className="search-section card" id="search-section-run" ref={node => { sectionRefs.current.run = node }} aria-labelledby="search-run-title">
+              <header className="search-section-head"><span className="group-index">01</span><h3 id="search-run-title">运行与候选</h3><span className="badge">{run ? runStateLabels[run.status] ?? run.status : '等待授权'}</span></header>
+              {!run ? <div className="search-empty"><p className="muted">尚无运行记录。在左侧明确授权并开始搜索后，这里会显示流水线状态、错误代码与候选采集结果。</p></div> : <>
+                <dl className="search-status"><dt>运行 ID</dt><dd>{run.run_id}</dd><dt>流水线</dt><dd>{run.pipeline_status}</dd><dt>规划 / 搜索 / 证据发布</dt><dd>{run.plan_status ?? '未提供'} / {run.search_status ?? '未提供'} / {run.evidence_status ?? 'not_ready'}</dd><dt>外部派发关闭</dt><dd>{run.dispatch_closed === undefined ? '未提供' : run.dispatch_closed ? '是' : '否'}</dd></dl>
+                {run.search_status === 'partial' && <p className="warning">仅有部分采集结果；不丢弃已保存的 README 证据，也不把缺失视为不满足。</p>}
+                {[run.error_code, run.pipeline_error_code, ...(run.search_stop_reasons ?? [])].filter(Boolean).map((code, i) => <p className="warning" key={i}>{code}</p>)}
+                {run.operation_failures?.map((failure, i) => <p className="warning" key={i}>{failure.operation} · {failure.status} · {failure.error_code}</p>)}
+                <h4>候选与 README 采集状态</h4>
+                {!run.candidates?.length && <p className="muted">尚无候选记录，不代表需求不满足。</p>}
+                <ul>{run.candidates?.map(candidate => <li key={candidate.repository_id}>仓库 ID {candidate.repository_id} · README：{candidate.collection_status ?? '未提供'}</li>)}</ul>
+              </>}
+            </section>
+            <section className="search-section card" id="search-section-evidence" ref={node => { sectionRefs.current.evidence = node }} aria-labelledby="search-evidence-title">
+              <header className="search-section-head"><span className="group-index">02</span><h3 id="search-evidence-title">逐需求证据</h3>{evidence && <span className="badge success">{evidence.candidates.length} 个仓库</span>}</header>
+              <p className="warning">字面提及不是满足结论；否定语义、禁止约束及 ALL / ANY 均需人工核对。未找到提及也不代表不满足。</p>
+    
+    {!evidence ? <p className="muted">证据报告尚未读取或尚未发布。候选采集完成不等于证据已发布；可稍后只读刷新。</p> : <><p>{evidence.warning}</p>{evidence.candidates.length === 0 && <p>已发布报告没有候选。</p>}{evidence.candidates.map(candidate => <article className="search-candidate" key={candidate.repository_id}><h4>仓库 ID {candidate.repository_id} · README {candidate.availability}</h4>{candidate.source ? <details className="search-source"><summary>精确快照来源</summary><dl>{Object.entries(candidate.source).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></details> : <p>无已保存快照，无法确认。</p>}{evidence.requirement_items.map(requirement => {
+                const item = candidate.items.find(value => value.requirement_item_id === requirement.requirement_item_id)
+                return <details className="requirement-evidence" key={requirement.requirement_item_id}><summary>{requirement.text} · {evidenceLabel(item?.status ?? 'unconfirmed')}</summary><p>{requirement.requirement_item_id} · {requirement.modality} · {requirement.operator} · 逻辑组 {requirement.logic_group_id ?? '无'}</p>{item?.quotes.length ? item.quotes.map((quote, i) => <div key={i}><small>README 行 {quote.line_start}–{quote.line_end} · UTF-8 字节 [{quote.byte_start}, {quote.byte_end})</small><pre className="source-quote">{quote.text}</pre></div>) : <p>无精确引文，尚未确认。</p>}</details>
+              })}</article>)}</>}
+            </section>
+            <section className="search-section card" id="search-section-retrieval" ref={node => { sectionRefs.current.retrieval = node }} aria-labelledby="search-retrieval-title">
+              <header className="search-section-head"><span className="group-index">03</span><h3 id="search-retrieval-title">检索片段</h3>{retrieval && <span className="badge success">{retrieval.candidates.length} 个仓库</span>}</header>
+              <p className="warning">检索只表示“相关”，不代表功能已满足；不显示满足百分比。所有片段都来自已保存的 README 快照。</p>
     {run?.retrieval_status === 'failed' && <p className="warning" role="alert">检索证据生成失败（{run.retrieval_error_code ?? '未知原因'}）；搜索、字面证据与深度核对结果不受影响。</p>}
-    {run?.retrieval_status === 'partial' && <p className="warning">部分仓库或需求未能完成检索；已完成的片段仍会显示。</p>}
-    {!run?.retrieval_status || run.retrieval_status === 'not_started' ? <p className="muted">检索证据尚未生成。</p> : null}
-    {retrievalError && <p className="error" role="alert">{retrievalError}</p>}
-    {retrieval && <RetrievalEvidenceView bundle={retrieval} />}
-    <h3>深度核对与中文推荐</h3>
-    <div className="extraction-consent"><div><strong>单独授权 1 次深度核对模型调用</strong><p>只读取本次运行已保存的 README 快照，不再访问 GitHub。模型逐条判定「有证据支持 / 有证据冲突 / 信息不足」并给出行号，后端逐条复核行号后确定性地生成中文推荐标签与缺失功能清单；引文越界一律剔除。刷新只执行 GET，失败与中断都不自动重试。</p><p>预算：每个搜索运行最多 1 次模型调用；一个任务最多 3 个运行，间接封顶 3 次。</p><label className="resolution-check"><input type="checkbox" checked={deepConsent} disabled={busy || !!deepStorageError || !!deepAttempt || !snapshotsReady || phase !== 'not_started' || !enabled} onChange={event => setDeepConsent(event.target.checked)} />我单独同意为本次已保存的搜索快照调用 1 次深度核对模型</label></div></div>
-    <div className="requirement-actions"><button className="primary" disabled={deepSendDisabled} onClick={() => void startDeep()}>{busy && !deepAttempt ? '正在提交…' : deepResend ? '显式重发同一次授权（沿用 UUID）' : deepAttempt ? '本次运行已授权深度核对' : '开始深度核对（1 次模型调用）'}</button><button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新深度核对（仅 GET）</button></div>
-    <div aria-live="polite">{!attempt?.run_id && <p className="muted">请先完成一次搜索运行；深度核对只作用于已保存的搜索快照。</p>}{attempt?.run_id && !deepAttempt && !snapshotsReady && phase === 'not_started' && <p className="warning">候选派发尚未关闭或规划未发布，此时不会授权模型调用。</p>}{deepStorageError && <p className="warning" role="alert">{deepStorageError}</p>}{deepNotice && <p>{deepNotice}</p>}{deepError && <p className="error" role="alert">{deepError}</p>}</div>
-    {run?.deep_check && <dl className="search-status"><dt>深度核对状态</dt><dd>{deepPhaseLabel(phase)}</dd><dt>错误代码</dt><dd>{run.deep_check.error_code ?? '无'}</dd></dl>}
-    {!report && <p className="muted">尚无已发布的深度核对报告；报告未发布不代表需求不满足。</p>}
-    {report && <DeepReportView report={report} />}
-    <h3>06 / 逐仓库深度核查（MVP）</h3>
-    <p>这是独立于旧版 deep-check 的新授权。仅使用当前检索 Bundle 的候选仓库与已保存 README 片段；每个仓库最多调用模型一次，总计最多 5 次，不自动重试。</p>
-    <div className="extraction-consent"><div><strong>单独授权 DeepSeek 逐仓库深度核查</strong><p>我已知悉：本次深度核查仅向 DeepSeek 发送已确认的需求条目、候选仓库基本信息、已保存的 README 检索片段及必要引用坐标；不会直接上传原始 PDF/Word 文件。系统将按仓库最多发起 5 次模型调用，用于判断需求是否获得 README 文档支持、存在矛盾或证据不足，并可能产生 API 费用。</p><label className="resolution-check"><input type="checkbox" checked={reviewConsent} disabled={busy || reviewBusy || !enabled || !attempt?.run_id || !reviewReady || !!review} onChange={event => setReviewConsent(event.target.checked)} />我单独同意上述数据范围、用途、调用预算与可能产生的费用</label></div></div>
-    <div className="requirement-actions"><button className="primary" disabled={reviewSendDisabled} onClick={() => void startReview()}>{reviewBusy && !review ? '正在提交或读取…' : review ? '本次运行已授权深度核查' : '开始逐仓库深度核查（最多 5 次模型调用）'}</button><button className="secondary" disabled={busy || reviewBusy || !attempt?.run_id} onClick={() => void refreshReview(true)}>刷新深度核查（仅 GET）</button></div>
-    <div aria-live="polite">{!attempt?.run_id && <p className="muted">请先完成搜索与检索证据生成；深度核查只作用于已保存的检索 Bundle。</p>}{attempt?.run_id && !review && !reviewReady && <p className="warning">检索 Bundle 尚未就绪，或候选派发尚未关闭；此时不会授权模型调用。</p>}{reviewNotice && <p>{reviewBusy && <span className="spinner" />}{reviewNotice}</p>}{reviewStalled && <p className="warning">自动轮询已暂停；请手动 GET 查询。系统不会自动重发授权 POST。</p>}{reviewError && <p className="error" role="alert">{reviewError}</p>}</div>
-    {review && <><dl className="search-status"><dt>深度核查状态</dt><dd>{deepReviewStatusLabel(review.status)}</dd><dt>Manifest 持久化状态</dt><dd>{review.persisted_status}</dd><dt>Operation</dt><dd>{review.operation_id}</dd><dt>模型 / Prompt</dt><dd>{review.model} / {review.prompt_version}</dd><dt>授权时间 / Deadline</dt><dd>{review.authorized_at} / {review.deadline}</dd><dt>错误代码</dt><dd>{review.error_code ?? '无'}</dd></dl><details><summary>授权与报告完整性标识</summary><dl><dt>需求修订</dt><dd>{review.revision_id}</dd><dt>修订哈希</dt><dd>{review.revision_hash}</dd><dt>Bundle 哈希</dt><dd>{review.bundle_hash}</dd><dt>报告对象</dt><dd>{review.report_key ?? '尚未发布'}</dd><dt>报告 SHA-256</dt><dd>{review.report_hash ?? '尚未发布'}</dd></dl></details></>}
-    {review?.report ? <DeepReviewReportView report={review.report} /> : review && <p className="muted">尚无已发布的深度核查报告；未发布或结果未知不代表需求不满足。</p>}
+              {run?.retrieval_status === 'partial' && <p className="warning">部分仓库或需求未能完成检索；已完成的片段仍会显示。</p>}
+              {!run?.retrieval_status || run.retrieval_status === 'not_started' ? <p className="muted">检索证据尚未生成。</p> : null}
+              {retrievalError && <p className="error" role="alert">{retrievalError}</p>}
+              {retrieval && <RetrievalEvidenceView bundle={retrieval} />}
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div className="search-stage search-workspace-stage" hidden={stage !== 5}>
+      <div className="search-workspace deep-workspace">
+        <aside className="search-overview deep-overview card" aria-label="深度筛选概览">
+          <header className="overview-head">
+            <span className="section-index">05 / DEEP SCREEN</span>
+            <h2 id="deep-screen-title">深度筛选</h2>
+            <p className="overview-subtitle">深度核对与逐仓库核查都需单独授权；切换子界面、刷新或重新进入任务只执行 GET，不会自动重发模型调用。</p>
+            <div className="overview-badges">
+              <span className={`badge ${phase === 'ready' ? 'success' : ''}`}>{run?.deep_check ? deepPhaseLabel(phase) : '深度核对未授权'}</span>
+              {review && <span className={`badge ${review.report ? 'success' : ''}`}>{deepReviewStatusLabel(review.status)}</span>}
+              {review?.report?.ranking && <span className="badge success">排名已生成</span>}
+            </div>
+          </header>
+          <dl className="search-overview-status">
+            <div><dt>运行 ID</dt><dd><code title={attempt?.run_id ?? ''}>{attempt?.run_id ?? '尚未创建搜索运行'}</code></dd></div>
+            <div><dt>版本 ID</dt><dd><code title={revisionId}>{revisionId}</code></dd></div>
+            <div><dt>深度核对</dt><dd>{run?.deep_check ? deepPhaseLabel(phase) : '未授权'}</dd></div>
+            <div><dt>逐仓库核查</dt><dd>{review ? deepReviewStatusLabel(review.status) : reviewReady ? '可以授权' : '未就绪'}</dd></div>
+            <div><dt>检索 Bundle</dt><dd>{run?.retrieval_status ?? '未生成'}</dd></div>
+            <div><dt>确定性排名</dt><dd>{review?.report?.ranking ? '已生成' : '未生成'}</dd></div>
+          </dl>
+          <div className="search-budget">固定预算 · 深度核对 1 次 · 逐仓库最多 5 次模型 · 只读已保存 README</div>
+          <nav className="group-nav" aria-label="深度筛选分区">
+            <button type="button" className={deepSection === 'check' ? 'active' : ''} onClick={() => scrollToDeepSection('check')}>
+              <span className="nav-index">01</span><span className="nav-label">深度核对</span><span className="nav-status">{run?.deep_check ? deepPhaseLabel(phase) : '未授权'}</span>
+            </button>
+            <button type="button" className={deepSection === 'review' ? 'active' : ''} onClick={() => scrollToDeepSection('review')}>
+              <span className="nav-index">02</span><span className="nav-label">逐仓库核查</span><span className="nav-status">{review ? deepReviewStatusLabel(review.status) : '未授权'}</span>
+            </button>
+            <button type="button" className={deepSection === 'trace' ? 'active' : ''} onClick={() => scrollToDeepSection('trace')}>
+              <span className="nav-index">03</span><span className="nav-label">授权与追溯</span><span className="nav-status">{review?.report ? '已发布' : '未发布'}</span>
+            </button>
+          </nav>
+          <div className="search-auth-stack">
+            <details className="overview-extraction" open={deepAuthOpen} onToggle={event => { if (event.currentTarget.open !== deepAuthOpen) setDeepAuthOpenOverride(event.currentTarget.open) }}>
+              <summary>深度核对授权{run?.deep_check ? ` · ${deepPhaseLabel(phase)}` : ''}</summary>
+              <div className="overview-extraction-body">
+                <div className="search-auth-consent">
+                  <strong>单独授权 1 次深度核对模型调用</strong>
+                  <p>只读取本次运行已保存的 README 快照，不再访问 GitHub。模型逐条判定「有证据支持 / 有证据冲突 / 信息不足」并给出行号，后端逐条复核行号后确定性地生成中文推荐标签与缺失功能清单；引文越界一律剔除。刷新只执行 GET，失败与中断都不自动重试。</p>
+                  <p>预算：每个搜索运行最多 1 次模型调用；一个任务最多 3 个运行，间接封顶 3 次。</p>
+                  <label className="resolution-check"><input type="checkbox" checked={deepConsent} disabled={busy || !!deepStorageError || !!deepAttempt || !snapshotsReady || phase !== 'not_started' || !enabled} onChange={event => setDeepConsent(event.target.checked)} />我单独同意为本次已保存的搜索快照调用 1 次深度核对模型</label>
+                </div>
+                <div className="overview-extract-actions">
+                  <button className="primary" disabled={deepSendDisabled} onClick={() => void startDeep()}>{busy && !deepAttempt ? '正在提交…' : deepResend ? '显式重发同一次授权（沿用 UUID）' : deepAttempt ? '本次运行已授权深度核对' : '开始深度核对（1 次模型调用）'}</button>
+                  <button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新深度核对（仅 GET）</button>
+                </div>
+              </div>
+            </details>
+            <details className="overview-extraction" open={reviewAuthOpen} onToggle={event => { if (event.currentTarget.open !== reviewAuthOpen) setReviewAuthOpenOverride(event.currentTarget.open) }}>
+              <summary>逐仓库核查授权{review ? ` · ${deepReviewStatusLabel(review.status)}` : ''}</summary>
+              <div className="overview-extraction-body">
+                <div className="search-auth-consent">
+                  <strong>单独授权 DeepSeek 逐仓库深度核查</strong>
+                  <p>我已知悉：本次深度核查仅向 DeepSeek 发送已确认的需求条目、候选仓库基本信息、已保存的 README 检索片段及必要引用坐标；不会直接上传原始 PDF/Word 文件。系统将按仓库最多发起 5 次模型调用，用于判断需求是否获得 README 文档支持、存在矛盾或证据不足，并可能产生 API 费用。</p>
+                  <label className="resolution-check"><input type="checkbox" checked={reviewConsent} disabled={busy || reviewBusy || !enabled || !attempt?.run_id || !reviewReady || !!review} onChange={event => setReviewConsent(event.target.checked)} />我单独同意上述数据范围、用途、调用预算与可能产生的费用</label>
+                </div>
+                <div className="overview-extract-actions">
+                  <button className="primary" disabled={reviewSendDisabled} onClick={() => void startReview()}>{reviewBusy && !review ? '正在提交或读取…' : review ? '本次运行已授权深度核查' : '开始逐仓库深度核查（最多 5 次模型调用）'}</button>
+                  <button className="secondary" disabled={busy || reviewBusy || !attempt?.run_id} onClick={() => void refreshReview(true)}>刷新深度核查（仅 GET）</button>
+                </div>
+              </div>
+            </details>
+          </div>
+          <div className="overview-feedback" aria-live="polite">
+            {deepNotice && <p>{deepNotice}</p>}
+            {reviewNotice && <p>{reviewBusy && <span className="spinner" />}{reviewNotice}</p>}
+            {!attempt?.run_id && <p className="muted">请先完成一次搜索运行；深度核对只作用于已保存的搜索快照。</p>}
+            {attempt?.run_id && !deepAttempt && !snapshotsReady && phase === 'not_started' && <p className="warning">候选派发尚未关闭或规划未发布，此时不会授权模型调用。</p>}
+            {!attempt?.run_id && <p className="muted">逐仓库核查只作用于已保存的检索 Bundle。</p>}
+            {attempt?.run_id && !review && !reviewReady && <p className="warning">检索 Bundle 尚未就绪，或候选派发尚未关闭；此时不会授权模型调用。</p>}
+            {deepStorageError && <p className="warning" role="alert">{deepStorageError}</p>}
+            {deepError && <p className="error" role="alert">{deepError}</p>}
+            {reviewStalled && <p className="warning">自动轮询已暂停；请手动 GET 查询。系统不会自动重发授权 POST。</p>}
+            {reviewError && <p className="error" role="alert">{reviewError}</p>}
+          </div>
+        </aside>
+        <div className="search-editor deep-editor">
+          <div className="search-editor-scroll deep-editor-scroll" ref={deepScrollRef} onScroll={onDeepScroll}>
+            <section className="search-section card" id="deep-section-check" ref={node => { deepSectionRefs.current.check = node }} aria-labelledby="deep-check-title">
+              <header className="search-section-head"><span className="group-index">01</span><h3 id="deep-check-title">深度核对与中文推荐</h3>{run?.deep_check && <span className="badge">{deepPhaseLabel(phase)}</span>}</header>
+              {run?.deep_check && <dl className="search-status"><dt>深度核对状态</dt><dd>{deepPhaseLabel(phase)}</dd><dt>错误代码</dt><dd>{run.deep_check.error_code ?? '无'}</dd></dl>}
+              {!report && <p className="muted">尚无已发布的深度核对报告；报告未发布不代表需求不满足。</p>}
+              {report && <DeepReportView report={report} />}
+            </section>
+            <section className="search-section card" id="deep-section-review" ref={node => { deepSectionRefs.current.review = node }} aria-labelledby="deep-review-title">
+              <header className="search-section-head"><span className="group-index">02</span><h3 id="deep-review-title">逐仓库深度核查（MVP）</h3>{review && <span className="badge">{deepReviewStatusLabel(review.status)}</span>}</header>
+              <p>这是独立于旧版 deep-check 的新授权。仅使用当前检索 Bundle 的候选仓库与已保存 README 片段；每个仓库最多调用模型一次，总计最多 5 次，不自动重试。</p>
+              {review?.report ? <DeepReviewReportView report={review.report} showRanking={false} /> : review ? <p className="muted">尚无已发布的深度核查报告；未发布或结果未知不代表需求不满足。</p> : <p className="muted">尚未授权逐仓库深度核查；请在左侧「逐仓库核查授权」中确认数据范围与预算。</p>}
+            </section>
+            <section className="search-section card" id="deep-section-trace" ref={node => { deepSectionRefs.current.trace = node }} aria-labelledby="deep-trace-title">
+              <header className="search-section-head"><span className="group-index">03</span><h3 id="deep-trace-title">授权与报告追溯</h3>{review?.report ? <span className="badge success">已发布</span> : <span className="badge">未发布</span>}</header>
+              {review ? <>
+                <dl className="search-status"><dt>深度核查状态</dt><dd>{deepReviewStatusLabel(review.status)}</dd><dt>Manifest 持久化状态</dt><dd>{review.persisted_status}</dd><dt>Operation</dt><dd>{review.operation_id}</dd><dt>模型 / Prompt</dt><dd>{review.model} / {review.prompt_version}</dd><dt>授权时间 / Deadline</dt><dd>{review.authorized_at} / {review.deadline}</dd><dt>错误代码</dt><dd>{review.error_code ?? '无'}</dd></dl>
+                <details className="search-source"><summary>授权与报告完整性标识</summary><dl><dt>需求修订</dt><dd>{review.revision_id}</dd><dt>修订哈希</dt><dd>{review.revision_hash}</dd><dt>Bundle 哈希</dt><dd>{review.bundle_hash}</dd><dt>报告对象</dt><dd>{review.report_key ?? '尚未发布'}</dd><dt>报告 SHA-256</dt><dd>{review.report_hash ?? '尚未发布'}</dd></dl></details>
+                {review.report?.ranking && <p className="muted">确定性排名已随报告生成；完整排名在「最终结果」子界面展示。</p>}
+              </> : <p className="muted">逐仓库核查尚未授权，暂无 Operation 与报告完整性标识。</p>}
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div className="search-stage search-workspace-stage" hidden={stage !== 6}>
+      <div className="search-workspace result-workspace">
+        <aside className="search-overview result-overview card" aria-label="最终结果概览">
+          <header className="overview-head">
+            <span className="section-index">06 / RESULT</span>
+            <h2 id="result-title">最终结果与推荐</h2>
+            <p className="overview-subtitle">推荐排名来自已发布的深度核查报告，按确定性规则生成；切换子界面、刷新或重新进入任务只执行 GET，不会重新调用模型。</p>
+            <div className="overview-badges">
+              <span className={`badge ${ranking ? 'success' : ''}`}>{ranking ? '已发布' : '等待深度筛选'}</span>
+              {!ranking && review && <span className="badge">{deepReviewStatusLabel(review.status)}</span>}
+              {ranking && <span className="badge info">参与排名 {ranking.repositories.length} 个</span>}
+              {ranking && recommendationCounts && <span className="badge warn">待核查 {recommendationCounts.needs_review} 个</span>}
+            </div>
+          </header>
+          <dl className="search-overview-status">
+            <div><dt>运行 ID</dt><dd><code title={attempt?.run_id ?? ''}>{attempt?.run_id ?? '尚未创建搜索运行'}</code></dd></div>
+            <div><dt>版本 ID</dt><dd><code title={revisionId}>{revisionId}</code></dd></div>
+            <div><dt>逐仓库核查</dt><dd>{review ? deepReviewStatusLabel(review.status) : '未授权'}</dd></div>
+            <div><dt>排名规则</dt><dd>{ranking ? ranking.ranking_config_version : '未生成'}</dd></div>
+            <div><dt>参与 / 未参与</dt><dd>{ranking ? `${ranking.repositories.length} / ${ranking.excluded_repositories.length} 个仓库` : '未生成'}</dd></div>
+            <div><dt>报告生成时间</dt><dd>{review?.report?.created_at ?? '未发布'}</dd></div>
+          </dl>
+          <div className="search-budget">只读结果页 · 不发起新模型调用 · 未参与排名不等于不符合需求</div>
+          <nav className="group-nav" aria-label="最终结果分区">
+            <button type="button" className={resultSection === 'ranking' ? 'active' : ''} onClick={() => scrollToResultSection('ranking')}>
+              <span className="nav-index">01</span><span className="nav-label">推荐排名</span><span className="nav-status">{ranking ? `${ranking.repositories.length} 个仓库` : '未发布'}</span>
+            </button>
+            <button type="button" className={resultSection === 'trace' ? 'active' : ''} onClick={() => scrollToResultSection('trace')}>
+              <span className="nav-index">02</span><span className="nav-label">报告与授权溯源</span><span className="nav-status">{review?.report ? '已发布' : '未发布'}</span>
+            </button>
+          </nav>
+          <div className="overview-feedback" aria-live="polite">
+            {!ranking && !review && <p className="muted">尚未授权逐仓库深度核查；本页不会自动重试、重新调用模型或编造排名。</p>}
+            {!ranking && review && <p className="muted">深度核查{deepReviewStatusLabel(review.status)}；报告发布后本页自动显示排名，期间只读 GET。</p>}
+            {ranking && <p className="muted">排名按确定性规则生成；分数不能覆盖硬约束层级，排除不等于不符合需求。</p>}
+          </div>
+        </aside>
+        <div className="search-editor result-editor">
+          <div className="search-editor-scroll result-editor-scroll" ref={resultScrollRef} onScroll={onResultScroll}>
+            <section className="search-section card" id="result-section-ranking" ref={node => { resultSectionRefs.current.ranking = node }} aria-labelledby="result-ranking-title">
+              <header className="search-section-head"><span className="group-index">01</span><h3 id="result-ranking-title">推荐排名</h3><span className={`badge ${ranking ? 'success' : ''}`}>{ranking ? '已发布' : '等待深度筛选'}</span></header>
+              {ranking
+                ? <><p className="stage-boundary">推荐排名来自已发布的深度核查报告，按确定性规则生成；分数不能覆盖硬约束层级。</p><RankingView ranking={ranking} repositories={review!.report!.repositories} /></>
+                : <div className="requirements-empty"><h3>还没有已发布的最终排名</h3><p>请在“深度筛选”子界面完成逐仓库深度核查并等待报告发布。切换子界面不会自动重试、重新调用模型或编造结果。</p></div>}
+            </section>
+            <section className="search-section card" id="result-section-trace" ref={node => { resultSectionRefs.current.trace = node }} aria-labelledby="result-trace-title">
+              <header className="search-section-head"><span className="group-index">02</span><h3 id="result-trace-title">报告与授权溯源</h3><span className={`badge ${review?.report ? 'success' : ''}`}>{review?.report ? '已发布' : '未发布'}</span></header>
+              {review ? <>
+                <dl className="search-status"><dt>深度核查状态</dt><dd>{deepReviewStatusLabel(review.status)}</dd><dt>Manifest 持久化状态</dt><dd>{review.persisted_status}</dd><dt>Operation</dt><dd>{review.operation_id}</dd><dt>模型 / Prompt</dt><dd>{review.model} / {review.prompt_version}</dd><dt>授权时间 / Deadline</dt><dd>{review.authorized_at} / {review.deadline}</dd><dt>错误代码</dt><dd>{review.error_code ?? '无'}</dd>{review.report && <><dt>报告版本 / 生成时间</dt><dd>{review.report.version} / {review.report.created_at}</dd></>}<dt>排名规则</dt><dd>{ranking ? ranking.ranking_config_version : '未生成'}{ranking?.scored_at ? ` · ${ranking.scored_at}` : ''}</dd></dl>
+                <details className="search-source"><summary>授权与报告完整性标识</summary><dl><dt>需求修订</dt><dd>{review.revision_id}</dd><dt>修订哈希</dt><dd>{review.revision_hash}</dd><dt>Bundle 哈希</dt><dd>{review.bundle_hash}</dd><dt>报告对象</dt><dd>{review.report_key ?? '尚未发布'}</dd><dt>报告 SHA-256</dt><dd>{review.report_hash ?? '尚未发布'}</dd></dl></details>
+                <p className="muted">排名只使用已发布报告中的确定性结果；切换子界面或刷新只执行 GET，不会重发已完成的模型调用。</p>
+              </> : <p className="muted">逐仓库核查尚未授权，暂无 Operation 与报告完整性标识。请在「深度筛选」完成逐仓库深度核查并等待报告发布。</p>}
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 }
 
-export function DeepReviewReportView({ report }: { report: ReviewReport }) {
+export function DeepReviewReportView({ report, showRanking = true }: { report: ReviewReport; showRanking?: boolean }) {
   const verdictLabels: Record<string, string> = { supports: '有证据支持', contradicts: '有证据冲突', insufficient: '证据不足' }
   const reasonLabels: Record<string, string> = {
     supported_by_citation: '有效引文支持', conflicted_by_citation: '有效引文显示冲突',
@@ -265,7 +584,7 @@ export function DeepReviewReportView({ report }: { report: ReviewReport }) {
     <h4>调用与结果汇总</h4>
     <dl className="search-status"><dt>模型调用次数</dt><dd>{report.summary.usage.calls}（未知用量调用 {report.summary.usage.unknown_calls}）</dd><dt>已报告 Token 用量</dt><dd>输入 {report.summary.usage.prompt_tokens} · 输出 {report.summary.usage.completion_tokens} · 合计 {report.summary.usage.total_tokens}</dd><dt>仓库</dt><dd>总计 {report.summary.repositories_total} · 完成 {report.summary.repositories_completed} · 失败 {report.summary.repositories_failed} · 未知 {report.summary.repositories_unknown} · 跳过 {report.summary.repositories_skipped}</dd><dt>逐需求判定</dt><dd>支持 {report.summary.supports} · 冲突 {report.summary.contradicts} · 证据不足 {report.summary.insufficient} · 未知项 {report.summary.unknown_items}</dd></dl>
     <p className="muted">Token 合计只统计 Provider 明确返回用量的调用；未知用量不会被当作真实的 0。输入字节上界也不是 Tokenizer 用量。</p>
-    {report.ranking && <RankingView ranking={report.ranking} repositories={report.repositories} />}
+    {showRanking && report.ranking && <RankingView ranking={report.ranking} repositories={report.repositories} />}
     {report.warnings.length > 0 && <div className="warning"><strong>报告警告</strong><ul>{report.warnings.map((warning, index) => <li key={`${warning.code}-${index}`}>{warning.code}{warning.requirement_item_id ? ` · ${warning.requirement_item_id}` : ''}{warning.message ? ` · ${warning.message}` : ''}</li>)}</ul></div>}
     {report.repositories.length === 0 && <p>已发布报告没有可展示的仓库。</p>}
     {report.repositories.map(repository => <article className="search-candidate" key={repository.repository_id}>
