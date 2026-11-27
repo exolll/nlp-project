@@ -167,3 +167,25 @@ def test_duplicate_evidence_cannot_bypass_owner_check():
         'requirements': rev.requirements.model_copy(update={'source_evidence': [foreign, evidence]})})
     reasons = [row['reason'] for row in evidence_mismatches(mixed)]
     assert 'duplicate_evidence_id' in reasons
+
+def test_informational_summary_may_paraphrase_its_evidence():
+    """project_description and friends are summaries; a paraphrase is not an evidence mismatch."""
+    rev = revision([('project_description', '做一个任务管理工具，支持截止日期', 'informational',
+                     '课程作业要求实现一个支持截止日期的任务管理工具。')])
+    assert evidence_mismatches(rev) == []
+    assert validate_quality(rev)['ok'] is True
+
+
+def test_requirement_field_still_requires_a_verbatim_slice():
+    rev = revision([('required_features', '支持任务截止日期提醒', 'required', '系统必须支持任务截止日期。')])
+    mismatches = evidence_mismatches(rev)
+    assert mismatches and mismatches[0]['reason'] == 'not_verbatim'
+    assert validate_quality(rev)['ok'] is False
+
+
+def test_null_reverse_link_is_bound_by_item_evidence_ids():
+    """item.evidence_ids is authoritative: a null evidence.requirement_item_id is not a mismatch."""
+    rev = revision([('required_features', '实现检索', 'required', '系统必须实现检索。')])
+    rev.requirements.source_evidence[0].requirement_item_id = None
+    assert evidence_mismatches(rev) == []
+    assert validate_quality(rev)['ok'] is True

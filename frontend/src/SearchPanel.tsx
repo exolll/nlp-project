@@ -232,6 +232,7 @@ export default function SearchPanel({ taskId, revisionId, enabled }: { taskId: s
     {!run?.retrieval_status || run.retrieval_status === 'not_started' ? <p className="muted">检索证据尚未生成。</p> : null}
     {retrievalError && <p className="error" role="alert">{retrievalError}</p>}
     {retrieval && <RetrievalEvidenceView bundle={retrieval} />}
+    {run?.plan_warnings && run.plan_warnings.length > 0 && <p className="muted" role="status">规划来源已按实际执行的查询归一化：{run.plan_warnings.map(row => `${row.group}（声明 ${row.declared.join('、') || '无'} / 实际 ${row.used.join('、') || '无'}）`).join('；')}。以实际执行的查询为准。</p>}
     <h3>深度核对与中文推荐</h3>
     <div className="extraction-consent"><div><strong>单独授权 1 次深度核对模型调用</strong><p>只读取本次运行已保存的 README 快照，不再访问 GitHub。模型逐条判定「有证据支持 / 有证据冲突 / 信息不足」并给出行号，后端逐条复核行号后确定性地生成中文推荐标签与缺失功能清单；引文越界一律剔除。刷新只执行 GET，失败与中断都不自动重试。</p><p>预算：每个搜索运行最多 1 次模型调用；一个任务最多 10 个运行，间接封顶 10 次。</p><label className="resolution-check"><input type="checkbox" checked={deepConsent} disabled={busy || !!deepStorageError || !!deepAttempt || !snapshotsReady || phase !== 'not_started' || !enabled} onChange={event => setDeepConsent(event.target.checked)} />我单独同意为本次已保存的搜索快照调用 1 次深度核对模型</label></div></div>
     <div className="requirement-actions"><button className="primary" disabled={deepSendDisabled} onClick={() => void startDeep()}>{busy && !deepAttempt ? '正在提交…' : deepResend ? '显式重发同一次授权（沿用 UUID）' : deepAttempt ? '本次运行已授权深度核对' : '开始深度核对（1 次模型调用）'}</button><button className="secondary" disabled={busy || !attempt?.run_id} onClick={() => void refresh(true)}>刷新深度核对（仅 GET）</button></div>

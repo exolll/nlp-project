@@ -4,7 +4,12 @@ import json
 import re
 import unicodedata
 
-VERSION = 'requirement-quality-v1'
+from app.schemas.requirements import BUSINESS_FIELDS
+
+VERSION = 'requirement-quality-v2'
+# project_topic / project_description / project_type / domain are summaries by definition:
+# demanding a verbatim slice of the source would block every normal extraction.
+VERBATIM_FIELDS = frozenset(BUSINESS_FIELDS[4:])
 _TRAILING = '.,;:!?。；：！？、'
 _SPACE = re.compile(r'\s+')
 
@@ -66,7 +71,14 @@ def quality_warnings(revision):
 
 
 def evidence_mismatches(revision):
-    """Only evidence_ids explicitly linked to this item may prove verbatim containment."""
+    """Structural checks for every item; verbatim containment only for requirement fields.
+
+    Two deliberate exemptions keep the gate about evidence, not about model style:
+    - item.evidence_ids is the authoritative binding, so a null reverse link
+      (evidence.requirement_item_id is None) is bound, not a mismatch;
+    - informational fields (project_topic/description/type/domain) are summaries, so a
+      paraphrase is expected and is not reported as not_verbatim.
+    """
     source = list(revision.requirements.source_evidence)
     counts = {}
     for evidence in source:
@@ -80,7 +92,7 @@ def evidence_mismatches(revision):
     for item in revision.requirement_items:
         linked = [by_id[evidence_id] for evidence_id in item.evidence_ids if evidence_id in by_id]
         candidates = [evidence for evidence in linked
-                      if evidence.requirement_item_id == item.requirement_item_id]
+                      if evidence.requirement_item_id in (None, item.requirement_item_id)]
         text = canonical(item.text)
         if not text:
             mismatches.append({'requirement_item_id': item.requirement_item_id, 'field': item.field,
@@ -94,6 +106,8 @@ def evidence_mismatches(revision):
             reason = 'evidence_missing'
         elif not candidates:
             reason = 'evidence_not_bound'
+        elif item.field not in VERBATIM_FIELDS:
+            continue
         elif not any(text in canonical(evidence.original_text) for evidence in candidates):
             reason = 'not_verbatim'
         else:
@@ -104,7 +118,7 @@ def evidence_mismatches(revision):
 
 
 def validate_quality(revision):
-    """Warnings are non-blocking; a non-verbatim item blocks the draft."""
+    """Warnings are non-blocking; a non-verbatim requirement item blocks the draft."""
     warnings = quality_warnings(revision)
     mismatches = evidence_mismatches(revision)
     return {'version': VERSION, 'revision_hash': warnings['revision_hash'],

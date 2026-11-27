@@ -134,7 +134,10 @@ def test_frozen_shapes_idempotency_usage_and_restart(api_factory):
     api_factory.behavior['usage'] = {'prompt_tokens': 123, 'completion_tokens': 10}
     initial = start(client, headers, did, key)
     assert initial.status_code == 202
-    assert set(initial.json()) == {'extraction_id', 'status', 'error', 'model', 'prompt_version', 'usage', 'created_at'}
+    # 'diagnostic' is part of the frozen job shape since requirements-v4; it stays null on success.
+    assert set(initial.json()) == {'extraction_id', 'status', 'error', 'model', 'prompt_version', 'usage',
+                                   'created_at', 'diagnostic'}
+    assert initial.json()['diagnostic'] is None
     result = read(client, headers, did)
     assert result['extraction']['status'] == 'completed'
     assert result['extraction']['usage'] == api_factory.behavior['usage']

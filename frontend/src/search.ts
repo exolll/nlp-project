@@ -1,4 +1,4 @@
-export const searchBudget = { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } as const
+﻿export const searchBudget = { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } as const
 export type SearchPayload = { revision_id: string; consent: true; budget: typeof searchBudget }
 export type SearchAttempt = { key: string; payload: SearchPayload; run_id: string | null }
 export interface SearchRun {
@@ -8,6 +8,7 @@ export interface SearchRun {
   search_stop_reasons?: string[]; operation_failures?: { operation: string; status: string; error_code: string }[]
   candidates?: { repository_id: string; collection_status: string | null }[]
   retrieval_status?: string; retrieval_error_code?: string | null
+  plan_warnings?: { group: string; declared: string[]; used: string[] }[]
   deep_check?: DeepState | null
 }
 export interface RetrievalChunk {

@@ -1,4 +1,4 @@
-import type { ApiError, NormalizedDocument } from './api'
+﻿import type { ApiError, NormalizedDocument } from './api'
 
 export type SourceKind = 'assignment_document' | 'user_primary_text' | 'user_supplement' | 'user_revision'
 export interface UncertainItem { field: string; requirement_item_ids: string[]; reason: string; question: string; evidence_ids: string[] }
@@ -30,6 +30,8 @@ export type ItemEdit = Omit<RequirementItem, 'requirement_item_id'> & { requirem
 export interface ExtractionJob {
   extraction_id: string; status: 'queued' | 'extracting' | 'validating' | 'completed' | 'failed'
   error: ApiError | null; model: string; prompt_version: string; usage: Record<string, unknown> | null; created_at: string
+  // Sanitised validator location; present only when the model output failed validation.
+  diagnostic?: { validator: string; field: string | null } | null
 }
 export interface Revision {
   revision_id: string; task_id: string; revision_number: number; parent_revision_id: string | null

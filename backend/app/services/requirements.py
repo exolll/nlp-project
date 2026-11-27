@@ -54,11 +54,24 @@ def expire(agg, now):
             })
 
 
+def extraction_view(record):
+    """Project a stored record into the wire contract, exposing a sanitised diagnostic."""
+    job = dict(record['job'])
+    diagnostic = record.get('validation_diagnostic')
+    if isinstance(diagnostic, dict):
+        field = diagnostic.get('field')
+        job['diagnostic'] = {
+            'validator': str(diagnostic.get('validator') or 'unknown'),
+            'field': field if field in BUSINESS_FIELDS else None,
+        }
+    return ExtractionJob.model_validate(job)
+
+
 def snapshot(task, now):
     agg = aggregate(task)
     expire(agg, now)
     return DocumentRequirements(
-        extraction=agg['extractions'][-1]['job'] if agg['extractions'] else None,
+        extraction=extraction_view(agg['extractions'][-1]) if agg['extractions'] else None,
         revisions=agg['revisions'],
         latest_revision_id=agg['revisions'][-1]['revision_id'] if agg['revisions'] else None,
     )
@@ -274,7 +287,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
             expire(agg, now)
             for record in agg['extractions']:
                 if record['idempotency_key'] == key:
-                    return ExtractionJob.model_validate(record['job']), None
+                    return extraction_view(record), None
             if agg['revisions'] or any(r['job']['status'] in ACTIVE for r in agg['extractions']):
                 fail(409, 'EXTRACTION_CONFLICT', '已有有效提取或正在提取；请编辑版本或等待结果。')
             if len(agg['extractions']) >= settings.max_task_extractions:
@@ -380,7 +393,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
             quality = validate_quality(RequirementRevision.model_validate(revision))
             if not quality['ok']:
                 fail(422, 'REQUIREMENT_EVIDENCE_MISMATCH',
-                     '需求文字与原文证据不一致，请修改后保存新版本再确认。',
+                     '必需/偏好类需求文字与原文证据不一致（概述类字段不受此限），请修改后保存新版本再确认。',
                      details={'evidence_mismatches': quality['evidence_mismatches']})
             store.write_rate(session, now)
             revision.update(status='confirmed', confirmed_at=now.isoformat())

@@ -293,6 +293,13 @@ def run_view(record, manifest=None):
                                if screening else None)
         result['candidates'] = [dict(repository_id=repo_id, collection_status=row.get('collection_status'))
                                 for repo_id, row in manifest['candidates'].items()]
+        # Planner provenance is derived from the executed queries; surface the normalisation
+        # instead of leaving the warning stranded in the manifest.
+        operation = manifest.get('planner_operation') or {}
+        result['plan_warnings'] = [
+            {'group': str(row.get('group')), 'declared': list(row.get('declared') or []),
+             'used': list(row.get('used') or [])}
+            for row in (operation.get('source_normalization') or []) if isinstance(row, dict)]
     result['deep_check'] = _deep_projection(record, manifest)
     return result
 

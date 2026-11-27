@@ -115,6 +115,15 @@ class RequirementRevision(Contract):
     confirmed_at: datetime | None
 
 
+class ExtractionDiagnostic(StrictContract):
+    """Sanitised failure location: the validator name and, when known, the business field.
+
+    Internal line numbers and provider payloads never leave the server.
+    """
+    validator: str
+    field: RequirementField | None
+
+
 class ExtractionJob(Contract):
     extraction_id: UUID
     status: Literal['queued', 'extracting', 'validating', 'completed', 'failed']
@@ -123,6 +132,7 @@ class ExtractionJob(Contract):
     prompt_version: str
     usage: dict[str, Any] | None
     created_at: datetime
+    diagnostic: ExtractionDiagnostic | None = None
 
 
 class DocumentRequirements(Contract):
