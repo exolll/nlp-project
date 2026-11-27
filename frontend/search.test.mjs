@@ -102,8 +102,8 @@ const reviewOperation = { operation_id: 'operation', status: 'running', persiste
   deadline: '2026-01-01T00:10:00Z', report_key: null, report_hash: null, error_code: null, report: null }
 
 test('explicit payload fixes the confirmed revision and caps every external budget', () => {
-  assert.deepEqual(searchPayload('revision'), { revision_id: 'revision', consent: true, budget: { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } })
-  assert.equal(searchBudget.github_requests, searchBudget.search_requests + 2 * searchBudget.readme_candidates)
+  assert.deepEqual(searchPayload('revision'), { revision_id: 'revision', consent: true, budget: { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } })
+  assert.ok(searchBudget.github_requests >= searchBudget.search_requests + 2 * searchBudget.readme_candidates)
 })
 test('unknown submission, duplicate clicks and remount reuse the same durable UUID and exact payload', () => {
   const storage = memory()
@@ -418,12 +418,14 @@ test('actual API uses owner token and never retries an unknown POST; explicit re
   const calls = []
   globalThis.fetch = async (path, options) => { calls.push({ path, options }); throw Error('offline simulated disconnect') }
   try {
+    api.setLlmApiKey('sk-user-test-key')
     for (let i = 0; i < 2; i++) {
       const saved = reserveSearch(storage, 'search', 'revision')
       await assert.rejects(api.request('/tasks/task/search-runs', 'POST', undefined, saved.payload, saved.key))
       assert.equal(calls.length, i + 1)
     }
     assert.equal(calls[0].options.headers.Authorization, 'Bearer mock-owner')
+    assert.equal(calls[0].options.headers['X-LLM-API-Key'], 'sk-user-test-key')
     assert.equal(calls[0].options.headers['Idempotency-Key'], calls[1].options.headers['Idempotency-Key'])
     assert.equal(calls[0].options.body, calls[1].options.body)
   } finally { globalThis.fetch = originalFetch; if (originalStorage) Object.defineProperty(globalThis, 'sessionStorage', originalStorage); else delete globalThis.sessionStorage }

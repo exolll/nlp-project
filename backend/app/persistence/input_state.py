@@ -7,12 +7,13 @@ from app.services.storage import CASConflict, StorageError
 
 
 class APIError(Exception):
-    def __init__(self, status, code, message, retryable=False):
+    def __init__(self, status, code, message, retryable=False, details=None):
         self.status, self.code, self.message, self.retryable = status, code, message, retryable
+        self.details = details
 
 
-def fail(status, code, message, retryable=False):
-    raise APIError(status, code, message, retryable)
+def fail(status, code, message, retryable=False, details=None):
+    raise APIError(status, code, message, retryable, details)
 
 
 def utcnow():

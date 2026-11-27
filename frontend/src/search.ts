@@ -1,4 +1,4 @@
-export const searchBudget = { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } as const
+export const searchBudget = { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } as const
 export type SearchPayload = { revision_id: string; consent: true; budget: typeof searchBudget }
 export type SearchAttempt = { key: string; payload: SearchPayload; run_id: string | null }
 export interface SearchRun {

@@ -72,15 +72,24 @@ def test_verbatim_check_rejects_synonyms_but_allows_punctuation_case_space():
     assert mismatches and mismatches[0]['reason'] == 'not_verbatim'
 
 
-def test_quality_validation_blocks_only_mismatch():
+def test_quality_validation_treats_paraphrase_as_warning_but_hard_errors_block():
     rev = revision([
         ('project_topic', 'Build a project tracker', 'informational', 'Build a project tracker.'),
         ('required_features', 'Build a project tracker', 'required', 'Build a project tracker.'),
     ])
     result = validate_quality(rev)
     assert result['ok'] is True and result['warnings']
-    bad = revision([('required_features', 'Unrelated feature', 'required', 'Build a tracker.')])
-    assert validate_quality(bad)['ok'] is False
+    paraphrase = revision([('required_features', 'Unrelated feature', 'required', 'Build a tracker.')])
+    warned = validate_quality(paraphrase)
+    assert warned['ok'] is True
+    assert warned['evidence_mismatches'] == []
+    assert any(row['code'] == 'NOT_VERBATIM' for row in warned['warnings'])
+    no_evidence = revision([('required_features', 'Build a tracker', 'required', 'Build a tracker.')])
+    no_evidence.requirement_items[0].evidence_ids = []
+    blocked = validate_quality(no_evidence)
+    assert blocked['ok'] is False
+    assert blocked['evidence_mismatches'][0]['reason'] == 'empty_evidence_ids'
+    assert not any(row['code'] == 'NOT_VERBATIM' for row in blocked['warnings'])
 
 
 def test_canonical_normalizes_width_case_spaces_and_trailing_punctuation():

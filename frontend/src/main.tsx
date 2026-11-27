@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import { useEffect, useRef, useState } from 'react'
-import { codePoints, Failure, request, session, startSession, upload } from './api'
+import { codePoints, Failure, request, session, setLlmApiKey, startSession, upload } from './api'
 import type { Config, InputStatus, NormalizedDocument, Task } from './api'
 import RequirementsPanel from './RequirementsPanel'
 import './styles.css'
@@ -24,6 +24,8 @@ function App() {
   const [active, setActive] = useState('')
   const [tab, setTab] = useState<'text' | 'segments'>('text')
   const [dragging, setDragging] = useState(false)
+  const [llmKey, setLlmKey] = useState('')
+  const [llmNotice, setLlmNotice] = useState('')
   const lock = useRef(false)
   const input = useRef<HTMLInputElement>(null)
   const polling = useRef<AbortController | null>(null)
@@ -156,6 +158,14 @@ function App() {
   return <div className="app">
     <header className="topbar"><a className="brand" href="./"><span className="logo">P</span>ProjectPilot<span className="brand-sub">项目领航</span></a><span className="workspace"><i />个人工作区</span></header>
     <main>
+      <section className="card llm-key-card">
+        <div><span className="section-index">MODEL CREDENTIAL</span><h3>使用你自己的大模型 API Key</h3><p>仅保存在当前页面内存，不写入浏览器存储或服务端文件；刷新页面后需重新输入。未填写时使用服务端开发配置。</p></div>
+        <div className="llm-key-controls">
+          <input type="password" value={llmKey} autoComplete="off" spellCheck={false} placeholder="DeepSeek API Key（sk-…）" onChange={event => setLlmKey(event.target.value)} />
+          <button className="secondary" onClick={() => { setLlmApiKey(llmKey); setLlmNotice(llmKey.trim() ? '已应用到当前页面的模型请求。' : '已清除用户 Key，将使用服务端开发配置。') }}>保存 Key</button>
+          {llmNotice && <small role="status">{llmNotice}</small>}
+        </div>
+      </section>
       <div className="intro"><div><div className="eyebrow">从一份材料，开始一个好项目</div><h1>让项目的起点，更清晰<span>。</span></h1><p>上传材料，主动提取并确认需求，再单独授权搜索候选与核对 README 证据。</p></div><div className="phase"><span>02</span><div>需求确认<small>REQUIREMENTS</small></div></div></div>
       <div className="steps"><b><span>1</span>输入与解析</b><div /><span>2 · 主动提取需求</span><div /><span>3 · 编辑并确认</span></div>
       <div className="columns">

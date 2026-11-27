@@ -104,9 +104,19 @@ def evidence_mismatches(revision):
 
 
 def validate_quality(revision):
-    """Warnings are non-blocking; a non-verbatim item blocks the draft."""
-    warnings = quality_warnings(revision)
+    """Hard evidence errors block; not_verbatim is a review warning."""
+    base = quality_warnings(revision)
     mismatches = evidence_mismatches(revision)
-    return {'version': VERSION, 'revision_hash': warnings['revision_hash'],
-            'warnings': warnings['warnings'], 'evidence_mismatches': mismatches,
-            'ok': not mismatches}
+    blocking = [row for row in mismatches if row['reason'] != 'not_verbatim']
+    soft = [row for row in mismatches if row['reason'] == 'not_verbatim']
+    warnings = list(base['warnings'])
+    for row in soft:
+        warnings.append({
+            'code': 'NOT_VERBATIM', 'revision_hash': base['revision_hash'],
+            'field': row['field'], 'requirement_item_id': row['requirement_item_id'],
+            'evidence_ids': list(row['evidence_ids']),
+            'message': '需求文字不是原文证据的逐字片段，请人工核对。',
+        })
+    return {'version': VERSION, 'revision_hash': base['revision_hash'],
+            'warnings': warnings, 'evidence_mismatches': blocking,
+            'soft_warnings': soft, 'ok': not blocking}

@@ -9,6 +9,9 @@ export class Failure extends Error {
 }
 const base = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
 const tokenKey = 'projectpilot.session'
+let llmApiKey = ''
+export function setLlmApiKey(value: string) { llmApiKey = value.trim() }
+export function hasLlmApiKey() { return !!llmApiKey }
 export function session(): { access_token: string; expires_at: string } | null {
   try { return JSON.parse(sessionStorage.getItem(tokenKey) || 'null') } catch { return null }
 }
@@ -18,7 +21,7 @@ function failure(status: number, body?: Partial<ApiError>): Failure {
 export async function request<T>(path: string, method = 'GET', signal?: AbortSignal, payload: unknown = {}, key?: string): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${base}${path}`, { method, signal, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}), ...(session()?.access_token ? { Authorization: `Bearer ${session()!.access_token}` } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(payload) } : {}) })
+    response = await fetch(`${base}${path}`, { method, signal, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}), ...(llmApiKey ? { 'X-LLM-API-Key': llmApiKey } : {}), ...(session()?.access_token ? { Authorization: `Bearer ${session()!.access_token}` } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(payload) } : {}) })
   } catch (e) { if (signal?.aborted) throw e; throw failure(0) }
   const body = await response.json().catch(() => null)
   if (!response.ok) throw failure(response.status, body)

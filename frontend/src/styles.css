@@ -15,3 +15,9 @@ input,select{font:inherit;color:inherit}input:focus-visible,select:focus-visible
 .ranking-breakdown{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:12px}
 .ranking-breakdown th,.ranking-breakdown td{padding:5px 8px;border-bottom:1px solid #e6e3f2;text-align:left}
 .ranking-breakdown th{color:#6d7085;font-weight:500}
+.llm-key-card{display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap;margin:0 0 18px}
+.llm-key-card h3{margin:2px 0 4px;font-size:15px}
+.llm-key-card p{margin:0;color:#6d7085;font-size:12px;max-width:620px}
+.llm-key-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.llm-key-controls input{min-width:240px;padding:8px 10px;border:1px solid #d8d5e6;border-radius:8px;font-family:inherit}
+.llm-key-controls small{color:#26745c}

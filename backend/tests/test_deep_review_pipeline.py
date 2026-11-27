@@ -728,6 +728,26 @@ def test_requirement_quality_failure_is_rejected_before_provider_call():
     assert error.value.code == 'DEEP_REVIEW_REQUIREMENT_QUALITY'
 
 
+def test_not_verbatim_warning_does_not_block_deep_review():
+    context = make_context([b'README'])
+    revision = context['revision'].model_copy(deep=True)
+    revision.requirement_items[0].text = '概括后的需求'
+    bundle = copy.deepcopy(context['bundle'])
+    bundle['revision_hash'] = revision_hash(revision)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        envelope = request_envelope(request)
+        return response({'assessments': [assessment(
+            str(revision.requirement_items[0].requirement_item_id),
+            chunk_id=envelope['chunks'][0]['chunk_id'])]})
+
+    report = execute(context, handler, revision=revision, bundle=bundle)
+    assert len(calls) == 1
+    assert any(warning.code == 'NOT_VERBATIM' for warning in report.warnings)
+
+
 def test_conflicting_duplicate_chunk_is_rejected_before_provider_call():
     specs = [{'text': '需求一'}, {'text': '需求二'}]
     context = make_context([b'README'], specs)

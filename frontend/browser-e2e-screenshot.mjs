@@ -52,7 +52,7 @@ try {
   await command('Runtime.enable')
   await command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false })
   const attempt = { key: crypto.randomUUID(), payload: { revision_id: control.revision_id, consent: true,
-    budget: { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } },
+    budget: { model_calls: 1, github_requests: 20, search_requests: 9, readme_candidates: 5, per_page: 5, max_pages: 1 } },
     run_id: control.run_id }
   const source = `
     try {

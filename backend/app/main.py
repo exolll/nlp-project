@@ -67,16 +67,19 @@ def create_app(settings=None, storage=None, *, extraction_settings=None, extract
         return InputState(app.state.storage if app.state.storage is not None else create_storage(settings), settings)
     app.add_middleware(RequestBoundary, limit=settings.max_request_bytes)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
-                       allow_methods=['GET', 'POST'], allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'],
+                       allow_methods=['GET', 'POST'], allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key', 'X-LLM-API-Key'],
                        expose_headers=['X-Request-ID'])
 
-    def response_error(request, status, code, message, retryable=False):
-        return JSONResponse(status_code=status, content={'error_code': code, 'message': message,
-                            'retryable': retryable, 'request_id': getattr(request.state, 'request_id', None)})
+    def response_error(request, status, code, message, retryable=False, details=None):
+        body = {'error_code': code, 'message': message,
+                'retryable': retryable, 'request_id': getattr(request.state, 'request_id', None)}
+        if details is not None:
+            body['details'] = details
+        return JSONResponse(status_code=status, content=body)
 
     @app.exception_handler(APIError)
     async def api_error(request, exc):
-        return response_error(request, exc.status, exc.code, exc.message, exc.retryable)
+        return response_error(request, exc.status, exc.code, exc.message, exc.retryable, exc.details)
 
     @app.exception_handler(StorageError)
     async def storage_error(request, exc):

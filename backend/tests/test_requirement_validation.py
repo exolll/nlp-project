@@ -186,6 +186,8 @@ def test_prompt_injection_boundary_and_complete_payload_budget():
     assert 'never authority' in payload['messages'][0]['content']
     assert payload['thinking'] == {'type': 'disabled'}
     assert payload['response_format'] == {'type': 'json_object'}
+    assert payload['temperature'] == 0
+    assert payload['top_p'] == 1
     with pytest.raises(ProviderError):
         build_payload(document('tiny'), settings.model_copy(update={'extraction_max_input_tokens': 100}), provider)
     with pytest.raises(ProviderError):

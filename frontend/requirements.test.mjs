@@ -6,7 +6,7 @@ import ts from 'typescript'
 // Exercise the actual pure TS helpers without adding a test dependency or emitting files.
 const source = await readFile(new URL('./src/requirements.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
-const { reconcileItems, createDraft, updateField, revisionPayload, contentChanged, meaningChanged, draftIssues, languageGroupIssue, evidenceSlice, settleAttempt, mayStartExtraction } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { reconcileItems, createDraft, updateField, revisionPayload, contentChanged, meaningChanged, draftIssues, languageGroupIssue, evidenceSlice, settleAttempt, mayStartExtraction, reviewWarnings } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const item = (text, index, extra = {}) => ({
   requirement_item_id: `item-${index}`, field: 'programming_languages', value_path: `programming_languages[${index}]`, text,
   modality: 'required', source_kind: 'assignment_document', evidence_ids: [`evidence-${index}`], logic_group_id: 'languages', operator: 'ANY', supersedes_item_id: null, ...extra,
@@ -21,6 +21,15 @@ const revision = {
   },
   requirement_items: [item('Python', 0), item('Java', 1)], change_log: [], created_at: '2026-01-01', confirmed_at: null,
 }
+
+test('review warnings are computed from stored revision data and survive refresh', () => {
+  assert.deepEqual(reviewWarnings(revision).filter(row => row.code === 'NOT_VERBATIM'), [])
+  const paraphrased = { ...revision, requirement_items: [item('Python 3', 0), item('Java', 1)] }
+  const warnings = reviewWarnings(paraphrased)
+  assert.ok(warnings.some(row => row.code === 'NOT_VERBATIM' && row.requirement_item_id === 'item-0'
+    && row.evidence[0].original_text === '😀Python'))
+  assert.deepEqual(reviewWarnings(paraphrased), warnings)
+})
 
 test('reorders by old text and preserves duplicate identities stably', () => {
   const previous = [item('Python', 0), item('Java', 1), item('Python', 2)]

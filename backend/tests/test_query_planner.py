@@ -207,8 +207,8 @@ def test_unquoted_keywords_cannot_inject_search_syntax(h, text):
 
 @pytest.mark.parametrize('terms,code', [
     (['audio', 'transcription', 'timestamps'], 'PLANNER_INVALID_DRAFT'),
-    (['one two three four five six seven eight nine'], 'PLANNER_QUERY_TOO_LONG'),
-    (['download transcript', 'one two three four five six seven'], 'PLANNER_QUERY_TOO_LONG'),
+    (['one two three four five six seven eight nine ten eleven twelve thirteen'], 'PLANNER_QUERY_TOO_LONG'),
+    (['download transcript', 'one two three four five six seven eight nine ten eleven'], 'PLANNER_QUERY_TOO_LONG'),
 ])
 def test_query_concept_and_keyword_bounds(h, terms, code):
     h.body['groups'][0]['queries'][0]['terms'] = [
@@ -220,7 +220,7 @@ def test_query_concept_and_keyword_bounds(h, terms, code):
 
 
 @pytest.mark.parametrize('words,ok', [(0, False), (1, True), (4, True),
-                                      (5, True), (8, True), (9, False)])
+                                      (5, True), (8, True), (9, True), (12, True), (13, False)])
 def test_query_keyword_boundary(words, ok):
     from app.services.query_planner import _query_text
     text = ' '.join(f'w{index}' for index in range(words))
@@ -354,7 +354,7 @@ def test_preflight_never_calls(h, change):
     assert 'planner_operation' not in h.manifest()
 
 
-@pytest.mark.parametrize('change', ['extra', 'wrong_group', 'out_of_bounds', 'empty_ready',
+@pytest.mark.parametrize('change', ['extra', 'wrong_group', 'out_of_bounds',
                                   'skip_query', 'budget', 'missing_group', 'term_invented',
                                   'term_wrong_source', 'strict', 'syntax'])
 def test_invalid_drafts(h, change):
@@ -366,8 +366,6 @@ def test_invalid_drafts(h, change):
         g['sources'] = ['/required_features/0']
     elif change == 'out_of_bounds':
         g['sources'] = ['/project_topic/9']
-    elif change == 'empty_ready':
-        g['sources'] = []
     elif change == 'skip_query':
         g['status'] = 'skipped'
     elif change == 'budget':
@@ -447,8 +445,15 @@ def test_language_not_promoted(h, case):
         h.body['groups'][2]['queries'][0]['language_filter'] = 'Java'
     elif case == 'no_source':
         h.body['groups'][0]['queries'][0]['language_filter'] = 'Python'
-    with pytest.raises(PlannerError):
-        h.run()
+    if case in ('multiple', 'prohibited'):
+        with pytest.raises(PlannerError):
+            h.run()
+        return
+    plan = h.run()
+    group = plan.groups[0 if case == 'no_source' else 2]
+    assert group.queries[0].language_filter is None
+    assert any('dropped_language_filter' in row
+               for row in h.manifest()['planner_operation']['query_normalization'])
 
 
 def test_complex_negation_preserved_but_not_discovered(h):
@@ -545,10 +550,12 @@ def test_no_sources_all_skipped(h):
     assert h.calls == 0
 
 
-def test_composite_language_is_not_exact_filter(h):
+def test_composite_language_filter_is_dropped_with_warning(h):
     language_case(h, ['Python or Java'])
-    with pytest.raises(PlannerError, match='PLANNER_LANGUAGE_UNSUPPORTED'):
-        h.run()
+    plan = h.run()
+    assert plan.groups[2].queries[0].language_filter is None
+    assert h.manifest()['planner_operation']['query_normalization'] == [{
+        'group': 'C', 'query_index': 0, 'dropped_language_filter': 'Python or Java'}]
 
 
 def test_preference_is_discovery_only(h):
@@ -613,6 +620,36 @@ def test_translation_keeps_pointer(h):
     assert result.planner_version == result.prompt_version == 'planner-v3'
     op = h.manifest()['planner_operation']
     assert op['draft_key'] == f"planner-drafts/{op['plan_id']}.json"
+
+
+def test_declared_sources_are_trimmed_to_executed_queries(h):
+    h.revision.requirements.project_description = '补充描述'
+    items(h.revision)
+    group = h.body['groups'][0]
+    group['sources'] = ['/project_topic', '/project_description']
+    plan = h.run()
+    assert plan.groups[0].source_requirement_pointers == ['/project_topic']
+    assert h.manifest()['planner_operation']['source_normalization'] == [{
+        'group': 'A', 'declared': ['/project_description', '/project_topic'],
+        'used': ['/project_topic']}]
+
+
+def test_empty_declared_sources_are_derived_from_executed_queries(h):
+    h.body['groups'][0]['sources'] = []
+    assert h.run().groups[0].source_requirement_pointers == ['/project_topic']
+
+
+def test_missing_declared_source_is_added_from_executed_queries(h):
+    h.revision.requirements.project_description = '补充描述'
+    items(h.revision)
+    group = h.body['groups'][0]
+    group['sources'] = ['/project_topic']
+    group['queries'][0]['terms'][0]['source'] = '/project_description'
+    plan = h.run()
+    assert plan.groups[0].source_requirement_pointers == ['/project_description']
+    assert h.manifest()['planner_operation']['source_normalization'] == [{
+        'group': 'A', 'declared': ['/project_topic'],
+        'used': ['/project_description']}]
 
 
 @pytest.mark.parametrize('text', ['bad\nterm', 'bad\tterm', 'bad\x00term', 'bad\x7fterm',
@@ -706,6 +743,25 @@ def test_preference_does_not_narrow_required(h, combined):
         assert len(h.run().groups[2].queries) == 3
 
 
+def test_mixed_required_preferred_query_drops_preferred_term(h):
+    h.revision.requirements.required_features = ['检索']
+    h.revision.requirements.preferred_features = ['导出']
+    items(h.revision)
+    h.body['groups'][1].update(status='ready', skip_reason=None,
+        sources=['/required_features/0', '/preferred_features/0'],
+        queries=[dict(terms=[
+            dict(text='检索', source='/required_features/0'),
+            dict(text='导出', source='/preferred_features/0')],
+            language_filter=None, qualifiers={})])
+    plan = h.run()
+    query = plan.groups[1].queries[0]
+    assert query.source_requirement_pointers == ['/required_features/0']
+    assert query.query_text == '检索'
+    assert h.manifest()['planner_operation']['query_normalization'] == [{
+        'group': 'B', 'query_index': 0,
+        'dropped': [{'source': '/preferred_features/0', 'text': '导出'}]}]
+
+
 @pytest.mark.parametrize('field', ['required_technologies', 'preferred_technologies'])
 def test_technology_expansion_rejected(h, field):
     setattr(h.revision.requirements, field, ['SQLite'])
@@ -718,7 +774,7 @@ def test_technology_expansion_rejected(h, field):
         h.run()
 
 
-@pytest.mark.parametrize('change', ['missing_reason', 'blank_reason', 'skip_sources', 'unused_source'])
+@pytest.mark.parametrize('change', ['missing_reason', 'blank_reason', 'skip_sources'])
 def test_group_source_and_skip_contract(h, change):
     group = h.body['groups'][1]
     if change == 'missing_reason':
@@ -727,10 +783,6 @@ def test_group_source_and_skip_contract(h, change):
         group['skip_reason'] = '  '
     elif change == 'skip_sources':
         group['sources'] = ['/required_features/0']
-    else:
-        h.revision.requirements.domain = '搜索'
-        items(h.revision)
-        h.body['groups'][0]['sources'].append('/domain')
     with pytest.raises(PlannerError):
         h.run()
 

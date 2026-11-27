@@ -23,7 +23,7 @@ from test_requirement_validation import extraction
 
 @pytest.fixture
 def api_factory(tmp_path, monkeypatch):
-    stack, calls, behavior, mutex = ExitStack(), [], {}, Lock()
+    stack, calls, behavior, mutex, auth_headers = ExitStack(), [], {}, Lock(), []
     settings = Settings(environment='test', local_storage_directory=tmp_path, write_requests_per_minute=1000,
                         session_requests_per_minute=100, _env_file=None)
     provider = ExtractionSettings(deepseek_api_key='test-only', _env_file=None)
@@ -31,12 +31,15 @@ def api_factory(tmp_path, monkeypatch):
     def handler(request):
         with mutex:
             calls.append(1)
+            auth_headers.append(request.headers.get('authorization'))
         if behavior.get('timeout'):
             raise httpx.ReadTimeout('private-provider-detail')
         if 'status' in behavior:
             return httpx.Response(behavior['status'], text='private-provider-detail')
         doc = {'source_segments': json.loads(json.loads(request.content)['messages'][1]['content'])['UNTRUSTED_SOURCE_SEGMENTS']}
-        raw = behavior.get('raw', extraction(doc, behavior.get('specs')))
+        configured = behavior.get('raw')
+        raw = configured(doc) if callable(configured) else (
+            configured if configured is not None else extraction(doc, behavior.get('specs')))
         return httpx.Response(200, json=success(json.dumps(raw, ensure_ascii=False), behavior.get('usage')))
     def factory(config=None, storage=None, injected=True):
         config = config or settings
@@ -46,6 +49,7 @@ def api_factory(tmp_path, monkeypatch):
         client = stack.enter_context(TestClient(app))
         return client, app, InputState(storage, config)
     factory.settings, factory.calls, factory.behavior = settings, calls, behavior
+    factory.auth_headers = auth_headers
     factory.storage = LocalStorage(tmp_path)
     yield factory
     stack.close()
@@ -242,6 +246,32 @@ def test_confirmation_preserves_history_latest_only_and_edit_retry(api_factory):
     assert result['revisions'][1]['parent_revision_id'] == parent['revision_id']
 
 
+def test_extraction_uses_request_scoped_user_llm_key(api_factory):
+    client, _, _ = api_factory()
+    headers, _, did = prepare(client)
+    response = client.post(f'/api/v1/documents/{did}/requirement-extractions',
+                           headers={**headers, 'Idempotency-Key': str(uuid4()),
+                                    'X-LLM-API-Key': 'sk-user-test-key'},
+                           json={})
+    assert response.status_code == 202
+    result = read(client, headers, did)
+    assert result['extraction']['status'] == 'completed'
+    assert api_factory.auth_headers[-1] == 'Bearer sk-user-test-key'
+
+
+def test_confirm_allows_non_verbatim_paraphrase_as_warning(api_factory):
+    def paraphrased(doc):
+        raw = extraction(doc)
+        raw['requirements']['required_features'][0] += '库'
+        raw['requirement_items'][0]['text'] = raw['requirements']['required_features'][0]
+        return raw
+    api_factory.behavior['raw'] = paraphrased
+    client, _, _ = api_factory()
+    headers, _, did = prepare(client)
+    revision = extracted(client, headers, did)
+    assert confirm(client, headers, revision['revision_id']).status_code == 200
+
+
 def test_language_gate_and_semantic_changes_create_ids(api_factory):
     api_factory.behavior['specs'] = [('programming_languages', 'Python', 'required'), ('programming_languages', 'Java', 'required')]
     client, _, _ = api_factory()
@@ -300,9 +330,9 @@ def test_bounded_orphan_recovery_no_replay(api_factory, monkeypatch):
 
 def test_failures_new_key_bounded_and_same_key_never_replayed(api_factory):
     api_factory.behavior['timeout'] = True
-    client, _, _ = api_factory()
+    client, _, _ = api_factory(api_factory.settings.model_copy(update={'extraction_max_calls': 10}))
     headers, _, did = prepare(client)
-    for _ in range(3):
+    for _ in range(10):
         key = str(uuid4())
         assert start(client, headers, did, key).status_code == 202
         result = read(client, headers, did)
@@ -310,7 +340,7 @@ def test_failures_new_key_bounded_and_same_key_never_replayed(api_factory):
         assert result['extraction']['usage'] is None
         assert start(client, headers, did, key).json()['status'] == 'failed'
     assert start(client, headers, did).status_code == 429
-    assert len(api_factory.calls) == 3
+    assert len(api_factory.calls) == 10
 
 
 def test_revision_cap_rejects_without_truncation(api_factory):

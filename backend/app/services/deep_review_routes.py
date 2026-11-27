@@ -9,7 +9,7 @@ import httpx
 from fastapi import BackgroundTasks, Request
 from pydantic import StrictBool, ValidationError
 
-from app.core.settings import ExtractionSettings
+from app.core.settings import ExtractionSettings, with_user_llm_key
 from app.persistence.input_state import APIError, fail, utcnow
 from app.persistence.run_manifest import RunManifestStore
 from app.schemas.documents import Contract
@@ -102,7 +102,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         raise ValueError('Injected model transport is permitted only for tests with MockTransport.')
     factory = search_backend_factory or BackendFactory()
 
-    def provider_config():
+    def provider_config(request):
         if settings.environment == 'production':
             fail(503, 'DEEP_REVIEW_NOT_PUBLIC', '付费深度核查尚未开放生产环境闸门。')
         if settings.environment == 'test' and (transport is None or provider_settings is None):
@@ -110,11 +110,16 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         try:
             provider = provider_settings if provider_settings is not None else ExtractionSettings()
             provider = ExtractionSettings.model_validate(provider.model_dump())
+            user_key = request.headers.get('x-llm-api-key')
+            if user_key is not None:
+                provider = with_user_llm_key(provider, user_key)
             if not provider.deepseek_api_key.get_secret_value().strip():
                 fail(503, 'DEEP_REVIEW_DISABLED', '深度核查尚未配置模型凭据。')
             return provider
         except ValidationError:
             fail(503, 'DEEP_REVIEW_MISCONFIGURED', '深度核查模型配置无效。')
+        except ValueError:
+            fail(422, 'LLM_API_KEY_INVALID', '用户提供的模型 API Key 格式无效。')
 
     def configuration():
         try:
@@ -239,7 +244,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
             fail(422, exc.code, '检索 Bundle 中没有可用于深度核查的有效片段。')
         if not usable:
             fail(422, 'DEEP_REVIEW_NO_ELIGIBLE_REPOSITORIES', '没有可用于深度核查的仓库片段。')
-        provider = provider_config()
+        provider = provider_config(request)
         config = configuration()
         authorized = utcnow()
         operation = {

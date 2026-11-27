@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     extraction_max_input_tokens: int = Field(20000, gt=0)
     extraction_max_calls: int = Field(5, gt=0)
     max_requirement_revisions: int = Field(50, gt=0, le=50)
-    max_task_extractions: int = Field(3, gt=0, le=3)
+    max_task_extractions: int = Field(10, gt=0, le=10)
 
     @model_validator(mode='after')
     def deployment_safety(self):
@@ -61,6 +61,16 @@ class ExtractionSettings(BaseSettings):
     deepseek_api_key: SecretStr = SecretStr('')
     deepseek_base_url: Literal['https://api.deepseek.com'] = 'https://api.deepseek.com'
     deepseek_model: Literal['deepseek-flash'] = 'deepseek-flash'
+
+
+def with_user_llm_key(config, key):
+    """Return a copy using the request-scoped user key; never persist or log it."""
+    if key is None:
+        return config
+    key = key.strip()
+    if not 8 <= len(key) <= 512 or any(ord(char) < 33 or ord(char) > 126 for char in key):
+        raise ValueError('Invalid API key')
+    return config.model_copy(update={'deepseek_api_key': SecretStr(key)})
 
 
 class SiliconFlowSettings(BaseSettings):

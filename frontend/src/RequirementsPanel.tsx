@@ -4,7 +4,7 @@ import SearchPanel from './SearchPanel'
 import type { NormalizedDocument } from './api'
 import {
   contentChanged, createDraft, draftIssues, evidenceSlice, fields, isPending, languageGroupIssue,
-  mayStartExtraction, meaningChanged, revisionPayload, settleAttempt, updateField,
+  mayStartExtraction, meaningChanged, revisionPayload, reviewWarnings, settleAttempt, updateField,
 } from './requirements'
 import type { Draft, Evidence, ExtractionAttempt, ExtractionJob, ItemEdit, RequirementsResponse, Revision } from './requirements'
 
@@ -22,12 +22,48 @@ function restoreAttempt(key: string): { attempt: Attempt | null; error: string }
     return { attempt: value, error: '' }
   } catch { return { attempt: null, error: '无法读取当前会话的提取记录。为避免重复计费，已停止发送；仍可刷新服务端结果。请恢复浏览器会话存储后重载页面。' } }
 }
+type BlockingMismatch = {
+  requirement_item_id: string | null; field: string | null; reason: string; evidence_ids: string[]
+}
+const blockingReasons: Record<string, string> = {
+  empty_text: '需求文字为空',
+  empty_evidence_ids: '没有关联证据',
+  evidence_missing: '引用的证据不存在',
+  evidence_not_bound: '证据没有绑定到当前需求',
+  duplicate_evidence_id: '证据 ID 重复，存在归属歧义',
+}
+function blockingMismatches(error: Failure): BlockingMismatch[] {
+  const details = error.info.details as { evidence_mismatches?: unknown } | null
+  const rows = details?.evidence_mismatches
+  if (!Array.isArray(rows)) return []
+  return rows.filter((row): row is BlockingMismatch => typeof row === 'object' && row !== null
+    && 'reason' in row && typeof row.reason === 'string'
+    && 'evidence_ids' in row && Array.isArray(row.evidence_ids))
+}
+function BlockingMismatchList({ error, revision }: { error: Failure; revision: Revision | null }) {
+  const rows = blockingMismatches(error)
+  if (!revision || !rows.length) return null
+  const items = new Map(revision.requirement_items.map(item => [item.requirement_item_id, item]))
+  return <div className="warning" role="alert">
+    <strong>需要修复的需求证据</strong>
+    <ul>{rows.map((row, index) => {
+      const item = row.requirement_item_id ? items.get(row.requirement_item_id) : null
+      return <li key={`${row.requirement_item_id ?? 'evidence'}-${index}`}>
+        <p>{item ? `${item.field} · ${item.requirement_item_id}` : (row.field ?? '证据整体')}</p>
+        {item && <p>当前需求文字：{item.text}</p>}
+        <p>失败原因：{blockingReasons[row.reason] ?? row.reason}</p>
+        <p>证据 ID：{row.evidence_ids.join('、') || '无'}</p>
+      </li>
+    })}</ul>
+  </div>
+}
 function asFailure(value: unknown): Failure {
   return value instanceof Failure ? value : new Failure(0, { error_code: 'CLIENT_ERROR', message: value instanceof Error ? value.message : '操作未完成，请先刷新核对。', retryable: true, details: null, request_id: '' })
 }
 function friendlyError(error: Failure): string {
   if (error.status === 401) return '会话已失效或无权访问此任务。本地编辑内容仍保留；请恢复有效会话后刷新，不会自动开始新会话或重新提取。'
   if (error.info.error_code === 'REQUIREMENTS_UNRESOLVED') return '服务端仍检测到未解决歧义或多语言硬要求缺少同组 ALL / ANY。请刷新核对，再编辑并保存新版本。'
+  if (error.info.error_code === 'REQUIREMENT_EVIDENCE_INVALID') return '需求证据缺失、归属无效或原文位置不一致，不能确认。请按下列条目修改后保存新版本。'
   if (error.info.error_code === 'INVALID_REVISION') return '服务端未接受条目属性或引用关系。请检查字段类别、禁止语义、逻辑组及歧义引用；本地编辑已保留。'
   if (error.status === 409) return '任务状态或版本已发生变化。请先刷新核对最新版本；本地编辑内容未丢弃，也不会自动覆盖服务器版本。'
   if (/not_configured|configuration|api_key|provider_unavailable|extraction_disabled|extraction_misconfigured/i.test(error.info.error_code)) return '模型服务尚未配置或暂不可用，请联系后端维护者处理。不要在前端填写服务密钥；本地内容已保留。'
@@ -87,6 +123,8 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
   const semanticChange = !!selected && !!draft && meaningChanged(draft, selected)
   const languagesIssue = draft ? languageGroupIssue(draft.items) : null
   const validationIssues = selected && draft ? draftIssues(draft, selected) : []
+  const review = selected ? reviewWarnings(selected) : []
+  const reviewIds = new Set(review.map(warning => warning.requirement_item_id))
   const uncertainties = selected?.requirements.uncertain_information ?? []
   const unresolved = uncertainties.length > 0 && !(draft?.resolved && semanticChange)
   const editable = latest && !!draft?.editing && !operation && !pending
@@ -244,7 +282,7 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
     </div></div>
     {storageError && <p className="warning" role="alert">{storageError}</p>}
     {attemptUnsettled && !pending && <div className="warning"><p>已保留本次提取的幂等键，尚未核实对应结果。必须先 GET 刷新核对；即使暂未查询到结果，也不会自动生成新键或重新付费。</p><button className="secondary" disabled={!canRecover} onClick={() => void extract(true)}>核对后重试同一次提取（沿用幂等键）</button></div>}
-    <div className="requirement-feedback" aria-live="polite"><p>{(reading || operation || (pending && !pollPaused)) && <span className="spinner" />}{notice}</p>{pollPaused && pending && <p className="warning">自动读取已暂停（达到时限或读取失败），不代表提取失败。请稍后手动刷新核对；不会自动重新提取。</p>}{error && <div className="error" role="alert"><strong>{friendlyError(error)}</strong><small>{error.info.error_code}{error.info.request_id && ` · 请求编号 ${error.info.request_id}`}</small><button disabled={reading || !!operation} onClick={() => void refresh(true)}>刷新核对，保留编辑</button></div>}</div>
+    <div className="requirement-feedback" aria-live="polite"><p>{(reading || operation || (pending && !pollPaused)) && <span className="spinner" />}{notice}</p>{pollPaused && pending && <p className="warning">自动读取已暂停（达到时限或读取失败），不代表提取失败。请稍后手动刷新核对；不会自动重新提取。</p>}{error && <div className="error" role="alert"><strong>{friendlyError(error)}</strong><small>{error.info.error_code}{error.info.request_id && ` · 请求编号 ${error.info.request_id}`}</small><button disabled={reading || !!operation} onClick={() => void refresh(true)}>刷新核对，保留编辑</button>{error.info.error_code === 'REQUIREMENT_EVIDENCE_INVALID' && <BlockingMismatchList error={error} revision={selected ?? null} />}</div>}</div>
     {job && <details className="extraction-details"><summary>提取记录 · {jobLabels[job.status]} · {new Date(job.created_at).toLocaleString('zh-CN')}</summary><dl><dt>模型</dt><dd>{job.model || '服务端未提供'}</dd><dt>提示词版本</dt><dd>{job.prompt_version || '服务端未提供'}</dd><dt>提取 ID</dt><dd>{job.extraction_id}</dd></dl>{job.error && <div className="error"><strong>{friendlyError(new Failure(422, job.error))}</strong><small>{job.error.error_code}</small></div>}{job.usage ? <><h4>服务端实际用量</h4><pre>{printable(job.usage)}</pre><p className="muted">仅展示返回的用量，不据此编造费用或性能数据。</p></> : <p className="muted">服务端暂未提供用量数据。</p>}</details>}
     {job?.error && <p className="warning" role="alert">{friendlyError(new Failure(422, job.error))}（{job.error.error_code}）</p>}
     {!selected || !draft ? <div className="requirements-empty"><h3>{pending ? '正在提取结构化需求' : '还没有可展示的需求版本'}</h3><p>{pending ? '只在任务排队、提取或校验期间有限轮询。你可以稍后从历史任务恢复结果。' : '请先主动提取，或刷新恢复服务端已有版本。提取失败不会清除原输入材料。'}</p></div> : <>
@@ -269,6 +307,15 @@ export default function RequirementsPanel({ document }: { document: NormalizedDo
       </section>
       <section className="evidence-section"><h3>来源证据 <span className="history-count">{selected.requirements.source_evidence.length}</span></h3><p className="muted">以下为所选版本的原始证据，只读且不允许伪造。核对使用 source_segments.original_content 内的 Unicode 码点范围，不使用 normalized_text。修改后的证据在保存新版本时由服务器重建。</p>{!selected.requirements.source_evidence.length && <p className="warning">此版本未提供来源证据，请人工核对输入材料。</p>}{selected.requirements.source_evidence.map(evidence => <EvidenceView key={evidence.evidence_id} evidence={evidence} document={document} />)}</section>
       <details className="change-log"><summary>版本变更记录</summary><p>父版本：{selected.parent_revision_id ?? '首个版本'}</p><pre>{printable(selected.change_log)}</pre></details>
+      {review.length > 0 && <section className="quality-review warning" role="status">
+        <strong>需求提取完成</strong>
+        <p>共 {selected.requirement_items.length} 条需求；{Math.max(0, selected.requirement_items.length - reviewIds.size)} 条正常；{reviewIds.size} 条建议审核。</p>
+        <ul>{review.map((warning, index) => <li key={`${warning.code}-${warning.requirement_item_id}-${index}`}>
+          <p>{warning.message}</p>
+          {warning.evidence.map(row => <p key={row.evidence_id}>原文证据：{row.original_text}</p>)}
+        </li>)}</ul>
+        <p className="muted">这些提示不阻止整体确认；请核对 AI 提取的需求是否准确反映原文后，一次确认全部需求。</p>
+      </section>}
       {validationIssues.length > 0 && <div className="warning" role="alert"><strong>保存前请检查</strong><ul>{validationIssues.map(issue => <li key={issue}>{issue}</li>)}</ul></div>}
       <div className="revision-save"><label htmlFor="change-reason">保存理由 <span>保存新版本时必填</span></label><textarea id="change-reason" rows={2} maxLength={2000} value={draft.reason} disabled={!editable} placeholder="说明修改了什么、为何这样修改…" onChange={event => updateDraft(value => ({ ...value, reason: event.target.value }))} /><div className="revision-buttons"><button className="primary" disabled={writeBlocked || !editable || validationIssues.length > 0 || !draft.reason.trim() || (!changed && selected.status !== 'confirmed')} onClick={() => void saveRevision()}>{operation === 'save' ? '正在保存…' : '保存为新版本（不确认）'}</button><button className="secondary confirm-button" disabled={writeBlocked || dirty || unresolved || !!languagesIssue || selected.status === 'confirmed'} onClick={() => void confirmRevision()}>{operation === 'confirm' ? '正在确认…' : selected.status === 'confirmed' ? '此版本已确认' : '确认此版本'}</button></div><p className="muted">{!latest ? '历史版本不可编辑或确认。' : dirty ? '有未保存的编辑，请先填写理由并保存新版本，再单独确认。' : unresolved ? '仍有未解决歧义，确认已禁用。' : languagesIssue ? languagesIssue : !synced ? '请先刷新核对状态，成功读取后才能提交。' : '确认不会搜索 GitHub 或启动后续阶段。'} 切换版本保留本页编辑；离开任务或刷新整页前请先保存。</p></div>
     </>}

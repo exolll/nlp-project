@@ -9,7 +9,7 @@ import httpx
 from fastapi import BackgroundTasks, Request
 from pydantic import ValidationError
 
-from app.core.settings import ExtractionSettings
+from app.core.settings import ExtractionSettings, with_user_llm_key
 from app.persistence.input_state import APIError, encode, fail, utcnow
 from app.schemas.documents import Contract
 from app.schemas.requirements import (
@@ -17,6 +17,7 @@ from app.schemas.requirements import (
     RequirementEvidence, RequirementItem, RequirementRevision, RevisionEdit,
 )
 from app.services.extraction_provider import PROMPT_VERSION, ProviderError, build_payload, call_provider
+from app.services.requirement_quality import validate_quality
 from app.services.requirement_validation import (
     check, extraction_diagnostic, language_logic_explicit, resolve_spans, signature, validate_coverage, validate_extraction, validate_links,
 )
@@ -245,7 +246,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
     if transport is not None and (settings.environment != 'test' or not isinstance(transport, httpx.MockTransport)):
         raise ValueError('Injected model transport is permitted only for tests with MockTransport.')
 
-    def provider_config():
+    def provider_config(request):
         if settings.environment == 'production':
             fail(503, 'EXTRACTION_NOT_PUBLIC', '付费提取尚未开放生产环境闸门，仅开发环境可用。')
         if settings.environment == 'test' and (transport is None or provider_settings is None):
@@ -253,11 +254,16 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         try:
             config = provider_settings if provider_settings is not None else ExtractionSettings()
             config = ExtractionSettings.model_validate(config.model_dump())
+            user_key = request.headers.get('x-llm-api-key')
+            if user_key is not None:
+                config = with_user_llm_key(config, user_key)
             if not config.deepseek_api_key.get_secret_value().strip():
                 fail(503, 'EXTRACTION_DISABLED', '需求提取尚未配置模型凭据；输入、编辑和查询仍可使用。')
             return config
         except ValidationError:
             fail(503, 'EXTRACTION_MISCONFIGURED', '需求提取配置无效，仅支持官方 HTTPS 端点及固定模型。')
+        except ValueError:
+            fail(422, 'LLM_API_KEY_INVALID', '用户提供的模型 API Key 格式无效。')
 
     @app.post('/api/v1/documents/{document_id}/requirement-extractions', response_model=ExtractionJob, status_code=202)
     def extract(document_id: UUID, body: Contract, request: Request, background: BackgroundTasks):
@@ -285,7 +291,7 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         existing, task = store.session(identity, preflight)
         if existing is not None:
             return existing
-        provider = provider_config()
+        provider = provider_config(request)
         try:
             payload = build_payload(task['document']['result'], settings, provider)
         except ProviderError as exc:
@@ -376,6 +382,11 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
             items = [RequirementItem.model_validate(item) for item in revision['requirement_items']]
             if revision['requirements']['uncertain_information'] or not language_logic_explicit(items):
                 fail(409, 'REQUIREMENTS_UNRESOLVED', '请先编辑消除歧义，并明确多语言硬要求的同组 ALL/ANY 关系。')
+            quality = validate_quality(RequirementRevision.model_validate(revision))
+            if not quality['ok']:
+                fail(422, 'REQUIREMENT_EVIDENCE_INVALID',
+                     '需求证据缺失、归属无效或原文位置不一致，不能确认。',
+                     details={'evidence_mismatches': quality['evidence_mismatches']})
             store.write_rate(session, now)
             revision.update(status='confirmed', confirmed_at=now.isoformat())
             return revision

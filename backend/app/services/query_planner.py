@@ -83,6 +83,10 @@ Pointers are RFC6901 paths relative to requirements, beginning with /.
 Examples: /project_topic and /required_features/0 are valid when present in the catalog;
 project_topic, required_features[0], /required_features and /requirements/project_topic
 are invalid. group.sources must equal the unique union of term.source across its queries.
+Do not list a source in group.sources unless at least one query term uses it.
+If a group has more positive sources than the 1..3 query limit, omit the less
+important source from the plan entirely; never declare it unused. Prefer omitting
+a preferred source over declaring it without a query.
 For terms from /required_features/0 and /required_features/1, sources must be
 ["/required_features/0", "/required_features/1"], never ["required_features"].
 Catalog positive=false entries are constraints only, not positive query sources.
@@ -173,9 +177,71 @@ def _query_text(terms, technical):
         return ' '.join(sorted({term.text if _keyword(term.text) else '"' + term.text + '"'
                                 for term in terms}))
     tokens = [token for term in terms for token in term.text.split()]
-    _require(1 <= len(tokens) <= 8, 'PLANNER_QUERY_TOO_LONG')
+    _require(1 <= len(tokens) <= 12, 'PLANNER_QUERY_TOO_LONG')
     _require(all(_keyword(token) for token in tokens), 'PLANNER_UNSAFE_KEYWORD')
     return ' '.join(sorted(set(tokens)))
+
+
+def source_normalization(raw):
+    """Report ready-group source declarations that differ from the executed queries."""
+    try:
+        groups = raw['groups']
+    except (KeyError, TypeError):
+        return []
+    warnings = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict) or group.get('status') != 'ready':
+            continue
+        declared, queries = group.get('sources'), group.get('queries')
+        if not isinstance(declared, list) or not isinstance(queries, list):
+            continue
+        used = sorted({
+            term['source'] for query in queries if isinstance(query, dict)
+            for term in (query.get('terms') or []) if isinstance(term, dict)
+            and isinstance(term.get('source'), str)
+        })
+        declared = sorted({source for source in declared if isinstance(source, str)})
+        if declared != used:
+            warnings.append({'group': group.get('name'), 'declared': declared, 'used': used})
+    return warnings
+
+
+def query_normalization(raw, revision):
+    """Report preferred terms dropped from queries that also contain hard sources."""
+    try:
+        sources = _sources(revision)
+        groups = raw['groups']
+    except (KeyError, TypeError, PlannerError):
+        return []
+    warnings = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict) or group.get('status') != 'ready':
+            continue
+        for index, query in enumerate(group.get('queries') or []):
+            terms = [term for term in (query.get('terms') or []) if isinstance(term, dict)]
+            modalities = {sources[term['source']].modality for term in terms
+                          if term.get('source') in sources}
+            if 'preferred' in modalities and modalities != {'preferred'}:
+                dropped = [{'source': term['source'], 'text': term.get('text')}
+                           for term in terms
+                           if term.get('source') in sources
+                           and sources[term['source']].modality == 'preferred']
+                if dropped:
+                    warnings.append({'group': group.get('name'), 'query_index': index,
+                                     'dropped': dropped})
+            language_filter = query.get('language_filter')
+            if language_filter is not None:
+                languages = [(pointer, item) for pointer, item in sources.items()
+                             if item.field == 'programming_languages']
+                if len(languages) == 1:
+                    pointer, item = languages[0]
+                    pointers = {term.get('source') for term in terms}
+                    if not (pointer in pointers and item.modality == 'required'
+                            and item.operator == 'not_applicable' and item.logic_group_id is None
+                            and item.text == language_filter and item.text in FILTER_LANGUAGES):
+                        warnings.append({'group': group.get('name'), 'query_index': index,
+                                         'dropped_language_filter': language_filter})
+    return warnings
 
 
 def compile_draft(raw, revision, run_id, operation):
@@ -192,20 +258,29 @@ def compile_draft(raw, revision, run_id, operation):
             if group.status == 'skipped':
                 _require(not group.queries and not group.sources)
                 _require(bool(group.skip_reason and group.skip_reason.strip()))
+                group_sources = []
             else:
-                _require(bool(group.sources) and 1 <= len(group.queries) <= 3
-                         and group.skip_reason is None)
-                _require(set(group.sources) == {t.source for q in group.queries for t in q.terms})
-            for index, query in enumerate(group.queries):
-                pointers = sorted({t.source for t in query.terms})
-                _require(set(pointers) <= set(group.sources))
+                _require(1 <= len(group.queries) <= 3 and group.skip_reason is None)
+                prepared = []
+                for query in group.queries:
+                    terms = list(query.terms)
+                    if 'preferred' in {sources[t.source].modality for t in terms} and any(
+                            sources[t.source].modality != 'preferred' for t in terms):
+                        terms = [t for t in terms if sources[t.source].modality != 'preferred']
+                    _require(bool(terms))
+                    prepared.append((query, terms))
+                group_sources = sorted({t.source for _query, terms in prepared for t in terms})
+                _require(bool(group_sources) and set(group_sources) <= allowed)
+            for index, (query, terms) in enumerate(prepared if group.status == 'ready' else []):
+                pointers = sorted({t.source for t in terms})
+                _require(set(pointers) <= set(group_sources))
                 selected = [sources[p] for p in pointers]
                 modalities = {i.modality for i in selected}
                 _require('preferred' not in modalities or modalities == {'preferred'})
                 languages_used = [i for i in selected if i.field == 'programming_languages']
                 if any(i.operator == 'ANY' for i in languages_used):
                     _require(len(languages_used) <= 1)
-                for term in query.terms:
+                for term in terms:
                     item = sources[term.source]
                     if item.field in GROUP_FIELDS['C']:
                         _require(term.text == item.text)
@@ -223,16 +298,17 @@ def compile_draft(raw, revision, run_id, operation):
                     scopes = {v for value in qualifiers['in'] for v in value.split(',')}
                     _require(bool(scopes) and scopes <= {'name', 'description', 'readme'})
                     qualifiers = {'in': [','.join(sorted(scopes))]}
-                if query.language_filter is not None:
+                language_filter = query.language_filter
+                if language_filter is not None:
                     languages = [(p, i) for p, i in sources.items() if i.field == 'programming_languages']
                     _require(len(languages) == 1, 'PLANNER_LANGUAGE_AMBIGUOUS')
                     pointer, item = languages[0]
-                    _require(pointer in pointers and item.modality == 'required'
-                             and item.operator == 'not_applicable' and item.logic_group_id is None
-                             and item.text == query.language_filter and item.text in FILTER_LANGUAGES,
-                             'PLANNER_LANGUAGE_UNSUPPORTED')
-                text = _query_text(query.terms, group.name == 'C')
-                fields = canonicalize_query(text, language_filter=query.language_filter, qualifiers=qualifiers)
+                    if not (pointer in pointers and item.modality == 'required'
+                            and item.operator == 'not_applicable' and item.logic_group_id is None
+                            and item.text == language_filter and item.text in FILTER_LANGUAGES):
+                        language_filter = None
+                text = _query_text(terms, group.name == 'C')
+                fields = canonicalize_query(text, language_filter=language_filter, qualifiers=qualifiers)
                 digest = query_hash(**fields)
                 if digest in queries:
                     old = queries[digest]
@@ -247,7 +323,7 @@ def compile_draft(raw, revision, run_id, operation):
                 queries[digest] = document
             groups.append(dict(group_id=str(uuid5(UUID(operation['plan_id']), group.name)),
                                group_name=group.name, group_purpose='Discovery ' + group.name,
-                               source_requirement_pointers=sorted(group.sources), group_status=group.status,
+                               source_requirement_pointers=group_sources, group_status=group.status,
                                skip_reason=(group.skip_reason if allowed else '没有可用正向来源')
                                if group.status == 'skipped' else None,
                                created_at=operation['created_at'], queries=list(queries.values())))
@@ -364,8 +440,21 @@ class QueryPlanner:
             _require(op['draft_key'] == f"planner-drafts/{op['plan_id']}.json", 'PLANNER_DRAFT_IDENTITY')
             raw, _ = self.persistence.storage.read_version(op['draft_key'])
             _require(raw is not None and _hash(raw) == op['draft_hash'], 'PLANNER_DRAFT_UNAVAILABLE')
+            draft = extraction_provider.strict_json(raw)
             try:
-                plan = compile_draft(extraction_provider.strict_json(raw), revision, run_id, op)
+                changes = {}
+                warnings = source_normalization(draft)
+                if warnings:
+                    changes['source_normalization'] = warnings
+                query_warnings = query_normalization(draft, revision)
+                if query_warnings:
+                    changes['query_normalization'] = query_warnings
+                if changes:
+                    op = self._update(owner, run_id, op, **changes)
+            except Exception:
+                pass
+            try:
+                plan = compile_draft(draft, revision, run_id, op)
             except Exception as exc:
                 code = exc.code if isinstance(exc, PlannerError) else 'PLANNER_INVALID_DRAFT'
                 self._update(owner, run_id, op, status='failed', error_code=code)

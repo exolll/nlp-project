@@ -43,9 +43,13 @@ Multiple languages are not automatically ALL or ANY. If not explicit, use
 not_applicable/null and uncertain_information explaining the ambiguity and asking
 for a decision. Unsupported nested or conflicting logic must be uncertain.
 UncertainItem references existing items/evidence. No invention of missing facts.
-Copy evidence verbatim, preserving punctuation and spaces. If an item paraphrases
-part of a sentence, quote the WHOLE original sentence rather than inventing a new
-sentence. Several items may quote the same sentence using separate evidence IDs.
+Copy evidence verbatim, preserving punctuation and spaces. Never truncate evidence
+just to make it match a shorter requirement text. Concise professional paraphrase
+in item text is allowed, but the evidence must still be the complete supporting
+sentence. Split independent capabilities into separate items instead of merging
+unrelated features. Do not infer domain, project_type or other fields unless the
+source explicitly states them. Several items may quote the same sentence using
+separate evidence IDs.
 Example ONLY (never copy example facts into the real extraction): input segment
 {"segment_id":"SEG-001","source_kind":"user_primary_text","source_location":"用户输入正文",
 "original_content":"必须支持创建任务和设置截止日期。"} yields JSON:
@@ -96,6 +100,7 @@ def build_payload(document, settings, provider):
     payload = {
         'model': provider.deepseek_model, 'thinking': {'type': 'disabled'},
         'response_format': {'type': 'json_object'}, 'stream': False,
+        'temperature': 0, 'top_p': 1,
         'max_tokens': settings.extraction_max_output_tokens,
         'messages': [
             {'role': 'system', 'content': SYSTEM_PROMPT + json.dumps(ModelExtraction.model_json_schema(), ensure_ascii=False)},

@@ -9,6 +9,7 @@ import anyio
 from fastapi import BackgroundTasks, Request
 from pydantic import Field, StrictBool, model_validator
 
+from app.core.settings import with_user_llm_key
 from app.persistence.input_state import APIError, encode, fail, utcnow
 from app.persistence.run_manifest import RunManifestStore
 from app.schemas.documents import Contract
@@ -21,7 +22,7 @@ from app.services.requirements import revision_task
 class SearchBudget(Contract):
     model_calls: int = Field(ge=1, le=1, strict=True)
     github_requests: int = Field(ge=1, le=20, strict=True)
-    search_requests: int = Field(default=5, ge=1, le=5, strict=True)
+    search_requests: int = Field(default=5, ge=1, le=9, strict=True)
     readme_candidates: int = Field(ge=0, le=5, strict=True)
     per_page: int = Field(default=5, ge=1, le=5, strict=True)
     max_pages: int = Field(default=1, ge=1, le=1, strict=True)
@@ -300,9 +301,21 @@ def run_view(record, manifest=None):
 def install_routes(app, state, owner, settings, factory=None):
     factory = factory or BackendFactory()
 
-    def config(external):
+    def config(external, request=None):
         try:
-            return factory.preflight(settings, external=external)
+            configuration = factory.preflight(settings, external=external)
+            key = request.headers.get('x-llm-api-key') if request is not None and external else None
+            if key is not None:
+                if not (isinstance(configuration, tuple) and len(configuration) == 3
+                        and configuration[1] is not None):
+                    fail(503, 'SEARCH_UNAVAILABLE', '用户模型 Key 无法应用到当前搜索配置。')
+                database, provider, github = configuration
+                try:
+                    provider = with_user_llm_key(provider, key)
+                except ValueError:
+                    fail(422, 'LLM_API_KEY_INVALID', '用户提供的模型 API Key 格式无效。')
+                configuration = (database, provider, github)
+            return configuration
         except APIError:
             raise
         except Exception:
@@ -432,7 +445,7 @@ def install_routes(app, state, owner, settings, factory=None):
         existing, confirmed = store.session(identity, check)
         if existing:
             return run_view(existing, manifest_for(store, identity, existing))
-        configuration = config(True)
+        configuration = config(True, request)
         record = dict(run_id=str(uuid4()), task_id=str(task_id), confirmed_revision_id=str(body.revision_id),
                       request_hash=digest, status='reserved')
         def claim(session):
@@ -440,8 +453,8 @@ def install_routes(app, state, owner, settings, factory=None):
             if existing:
                 return existing, False
             runs = store.task(session, task_id).setdefault('search_runs', {})
-            if len(runs) >= 3:
-                fail(429, 'SEARCH_RUN_LIMIT', '每个任务最多允许三次搜索运行。')
+            if len(runs) >= 10:
+                fail(429, 'SEARCH_RUN_LIMIT', '每个任务最多允许十次搜索运行。')
             store.write_rate(session, utcnow())
             runs[key] = deepcopy(record)
             return record, True
@@ -559,7 +572,7 @@ def install_routes(app, state, owner, settings, factory=None):
         manifest = manifest_for(store, identity, record)
         if manifest is None or not stable(manifest):
             fail(409, 'DEEP_CHECK_NOT_READY', '正式快照尚未稳定，不会发起模型调用。')
-        configuration = config(True)
+        configuration = config(True, request)
 
         def claim(session):
             check(session)

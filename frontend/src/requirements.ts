@@ -37,6 +37,53 @@ export interface Revision {
   change_log: unknown; created_at: string; confirmed_at: string | null
 }
 export interface RequirementsResponse { extraction: ExtractionJob | null; revisions: Revision[]; latest_revision_id: string | null }
+export interface ReviewWarning {
+  code: string; message: string; field: string; requirement_item_id: string
+  evidence: { evidence_id: string; original_text: string }[]
+}
+const qualityText = (value: string) => value.normalize('NFKC').toLowerCase()
+  .replace(/\s+/g, ' ').trim().replace(/[.,;:!?。；：！？、]+$/, '').trim()
+export function reviewWarnings(revision: Revision): ReviewWarning[] {
+  const items = revision.requirement_items
+  const evidence = new Map(revision.requirements.source_evidence.map(row => [row.evidence_id, row]))
+  const warnings: ReviewWarning[] = []
+  const seen = new Set<string>()
+  const add = (code: string, item: RequirementItem, message: string,
+               quotes: { evidence_id: string; original_text: string }[] = []) => {
+    const key = `${code}:${item.requirement_item_id}`
+    if (seen.has(key)) return
+    seen.add(key)
+    warnings.push({ code, message, field: item.field,
+                    requirement_item_id: item.requirement_item_id, evidence: quotes })
+  }
+  const topics = items.filter(item => item.field === 'project_topic').map(item => qualityText(item.text))
+  const groups = new Map<string, RequirementItem[]>()
+  for (const item of items) {
+    if (item.field !== 'project_topic' && topics.includes(qualityText(item.text))) {
+      add('DUPLICATE_PROJECT_GOAL', item, '该条与项目总体目标文字相同，请补充具体功能或确认删除。')
+    }
+    const key = qualityText(item.text)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+  for (const members of groups.values()) {
+    if (members.length < 2 || new Set(members.map(item => item.field)).size < 2) continue
+    for (const item of members) {
+      const others = [...new Set(members.filter(other => other.field !== item.field).map(other => other.field))]
+      if (others.length) add('DUPLICATE_REQUIREMENT', item, `该条与另一字段的需求文字完全相同：${others.join('、')}。`)
+    }
+  }
+  for (const item of items) {
+    const linked = item.evidence_ids.map(id => evidence.get(id)).filter(
+      (row): row is Evidence => !!row && row.requirement_item_id === item.requirement_item_id)
+    if (!linked.length) continue
+    const text = qualityText(item.text)
+    const quotes = linked.map(row => ({ evidence_id: row.evidence_id, original_text: row.original_text }))
+    if (!linked.some(row => qualityText(row.original_text).includes(text))) {
+      add('NOT_VERBATIM', item, '需求文字是概括表达，不是原文证据的逐字片段，请核对语义。', quotes)
+    }
+  }
+  return warnings
+}
 export interface ExtractionAttempt { key: string; state: 'unknown' | 'accepted' | 'completed' | 'failed'; baseline_id: string | null; extraction_id: string | null }
 export function settleAttempt(saved: ExtractionAttempt | null, extraction: ExtractionJob | null): ExtractionAttempt | null {
   if (!saved || !extraction) return saved

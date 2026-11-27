@@ -192,10 +192,17 @@ def test_full_flow_duplicate_conflict_and_read_only_get(api):
     {'budget': {'model_calls': 1, 'github_requests': 20, 'readme_candidates': 6}},
     {'budget': {'model_calls': 1, 'github_requests': 7, 'readme_candidates': 1, 'per_page': 6}},
     {'budget': {'model_calls': 1, 'github_requests': 7, 'readme_candidates': 1, 'max_pages': 2}},
+    {'budget': {'model_calls': 1, 'github_requests': 20, 'readme_candidates': 1, 'search_requests': 10}},
 ])
 def test_consent_and_budgets_fail_before_dispatch(api, change):
     assert start(api, {**api.body, **change}).status_code == 422
     assert not api.calls and api.factory.opens == 0
+
+
+def test_nine_search_queries_are_allowed(api):
+    body = {**api.body, 'budget': {'model_calls': 1, 'github_requests': 20,
+                                   'search_requests': 9, 'readme_candidates': 1}}
+    assert start(api, body).status_code == 202
 
 
 def test_ownership_revision_and_session(api):
@@ -325,11 +332,12 @@ def test_rate_limit_does_not_charge_duplicate_or_dispatch(api):
 def test_task_cap_keeps_duplicate_available(api):
     key = str(uuid4())
     first = start(api, key=key)
-    assert start(api).status_code == start(api).status_code == 202
+    for _ in range(9):
+        assert start(api).status_code == 202
     response = start(api)
     assert response.status_code == 429 and response.json()['error_code'] == 'SEARCH_RUN_LIMIT'
     assert start(api, key=key).json()['run_id'] == first.json()['run_id']
-    assert api.factory.plans == 3
+    assert api.factory.plans == 10
 
 
 def test_planner_error_code_is_exposed(api):
