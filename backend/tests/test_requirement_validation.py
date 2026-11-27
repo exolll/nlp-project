@@ -196,3 +196,36 @@ def test_prompt_injection_boundary_and_complete_payload_budget():
 def test_ambiguous_json_rejected(text):
     with pytest.raises(ValueError):
         strict_json(text)
+
+def test_uncertainty_may_quote_evidence_of_another_field():
+    """A supporting quote is not a claim about the uncertainty's own field."""
+    from app.services.requirement_validation import validate_links
+    doc = document('实现检索。Python、Java')
+    raw = extraction(doc, [('required_features', '实现检索', 'required'),
+                           ('programming_languages', 'Python', 'required'),
+                           ('programming_languages', 'Java', 'required')])
+    for item in raw['requirement_items'][1:]:
+        item.update(operator='ALL', logic_group_id='guessed')
+    req, items = validate_extraction(raw, doc)
+    uncertainty = req.uncertain_information[0]
+    assert uncertainty.field == 'programming_languages'
+    # Point the language uncertainty at the required_features evidence row.
+    feature_evidence = next(e for e in req.source_evidence if e.field == 'required_features')
+    uncertainty.evidence_ids = [feature_evidence.evidence_id]
+    validate_links(req, items)
+
+
+def test_uncertainty_with_unknown_evidence_is_still_rejected():
+    from app.services.requirement_validation import validate_links
+    doc = document('Python、Java')
+    raw = extraction(doc, [('programming_languages', 'Python', 'required'),
+                           ('programming_languages', 'Java', 'required')])
+    for item in raw['requirement_items']:
+        item.update(operator='ALL', logic_group_id='guessed')
+    req, items = validate_extraction(raw, doc)
+    req.uncertain_information[0].evidence_ids = ['missing-evidence']
+    try:
+        validate_links(req, items)
+    except ValueError:
+        return
+    raise AssertionError('unknown evidence must still fail')

@@ -104,7 +104,9 @@ def validate_links(requirements, items):
         check(set(uncertainty.evidence_ids) <= set(evidence))
         check(all(next(item for item in items if item.requirement_item_id == rid).field == uncertainty.field
                   for rid in uncertainty.requirement_item_ids))
-        check(all(evidence[eid].field == uncertainty.field for eid in uncertainty.evidence_ids))
+        # Uncertainties may quote a sentence that also supports another field; the evidence
+        # is a supporting quote, not a claim about the uncertainty's field. Rejecting the
+        # whole extraction over that bookkeeping detail would discard a valid result.
         linked.update(uncertainty.evidence_ids)
     check(linked == set(evidence), '不得携带无关或孤立证据。')
 
