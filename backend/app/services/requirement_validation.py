@@ -2,7 +2,8 @@
 import re
 from uuid import uuid4
 
-from app.schemas.requirements import BUSINESS_FIELDS, ModelExtraction, RequirementItem, UncertainItem
+from app.schemas.requirements import (BUSINESS_FIELDS, ModelExtraction, RequirementItem, RequirementJSON,
+                                      UncertainItem)
 
 NEGATION = re.compile(r"禁止|严禁|不得|不能|不可|不要|不准|不(?:使用|允许|采用|支持|依赖)|\b(?:must not|mustn't|shall not|do not|don't|cannot|not allowed|not permitted|without|prohibited|forbidden)\b", re.I)
 PREFERENCE = re.compile(r'建议|推荐|优先|最好|可选|尽量|可以|可考虑|倾向|\b(?:prefer(?:red|ably)?|recommend(?:ed)?|suggest(?:ed)?|optional|ideally|may|could|nice to have)\b', re.I)
@@ -193,8 +194,33 @@ def validate_source_rules(requirements, items, document):
                 for eid in item.evidence_ids) for item in items), '原文禁止条件未被提取或定位。')
 
 
+_TOP_LEVEL_ALIASES = {'items': 'requirement_items', 'requirement': 'requirements'}
+
+
+def normalize_model_payload(raw):
+    """Recover from the model's mechanical envelope slips before schema validation.
+
+    Observed in real runs: a renamed top-level key ("items"), an extra commentary key,
+    or the item list nested inside "requirements". None of these change what the model
+    meant, so they are repaired here instead of failing the whole extraction. The schema
+    is closed: unknown keys are dropped, and a missing required key still fails.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    data = {_TOP_LEVEL_ALIASES.get(key, key): value for key, value in raw.items()}
+    requirements = data.get('requirements')
+    if isinstance(requirements, dict):
+        requirements = dict(requirements)
+        nested = requirements.pop('requirement_items', None)
+        if nested is not None and 'requirement_items' not in data:
+            data['requirement_items'] = nested
+        allowed = set(RequirementJSON.model_fields)
+        data['requirements'] = {k: v for k, v in requirements.items() if k in allowed}
+    return {key: data[key] for key in ('requirements', 'requirement_items') if key in data}
+
+
 def validate_extraction(raw, document):
-    extraction = ModelExtraction.model_validate(raw)
+    extraction = ModelExtraction.model_validate(normalize_model_payload(raw))
     requirements, items = extraction.requirements, extraction.requirement_items
     check(all(item.requirement_item_id for item in items))
     check(len({item.requirement_item_id for item in items}) == len(items))

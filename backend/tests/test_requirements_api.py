@@ -104,7 +104,8 @@ def test_private_validation_diagnostic_redacts_model_content(api_factory, invali
     if invalid == 'quote':
         raw['requirements']['source_evidence'][0]['original_text'] = secret
     elif invalid == 'schema':
-        raw['requirements'][secret] = secret
+        # Wrong type for a legal key: the closed-schema normaliser must not swallow this.
+        raw['requirements']['missing_information'] = secret
     else:
         raw['requirements']['required_features'][0] = '禁止实现检索'
         raw['requirement_items'][0]['text'] = '禁止实现检索'

@@ -229,3 +229,34 @@ def test_uncertainty_with_unknown_evidence_is_still_rejected():
     except ValueError:
         return
     raise AssertionError('unknown evidence must still fail')
+def test_renamed_top_level_key_is_repaired():
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    raw['items'] = raw.pop('requirement_items')
+    req, items = validate_extraction(raw, doc)
+    assert len(items) == 1
+
+
+def test_extra_top_level_key_is_dropped():
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    raw['notes'] = 'model commentary'
+    req, items = validate_extraction(raw, doc)
+    assert len(items) == 1
+
+
+def test_items_nested_inside_requirements_are_moved_out():
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    raw['requirements']['requirement_items'] = raw.pop('requirement_items')
+    req, items = validate_extraction(raw, doc)
+    assert len(items) == 1
+
+
+def test_missing_requirements_still_fails():
+    import pytest
+    doc = document('实现检索。')
+    raw = extraction(doc, [('required_features', '实现检索', 'required')])
+    del raw['requirements']
+    with pytest.raises(Exception):
+        validate_extraction(raw, doc)
