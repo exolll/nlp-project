@@ -121,3 +121,18 @@ git revert --no-edit <本次提交>
 - 若只想恢复严格逐字：把 `evidence_mismatches()` 里的 `item.field not in VERBATIM_FIELDS` 分支删掉；
 - 若只想恢复反向绑定：把 `candidates` 的比较改回 `== item.requirement_item_id`；
 - 若只想恢复旧版本号：`PROMPT_VERSION = 'requirements-v3'`（注意这与 prompt 内容已不符）。
+
+---
+
+## 8. 追加修复（同日，随真实验收暴露）
+
+第一次修复上线后，用真实作业 `Assignment_1 (1).pdf` 继续验收，又暴露出两处"记账错误导致整单失败"，处理如下：
+
+| 提交 | 位置 | 现象 | 改法 |
+|---|---|---|---|
+| `75b5073` | `requirement_validation.py` `validate_links` | 歧义项引用了他字段的证据 → `EXTRACTION_INVALID`（真实作业命中） | 删除"不确定性证据必须同字段"的检查；保留"证据必须存在且被引用"，条目级字段一致性不变 |
+| `f25420c` | `requirement_validation.py` `validate_coverage` | 模型给 `project_type` 写了条目但顶层值为 null → `EXTRACTION_INVALID` | 描述类四字段移出覆盖率契约（只承载证据）；需求类五字段的覆盖率、modality、否定校验不变 |
+
+新增回归用例 3 个（跨字段不确定性 1 个、未知证据 1 个、描述类条目 1 个），需求相关测试 115 项通过。
+
+验收结果与完整证据链见 `docs/ProjectPilot_Acceptance_Record.md`。
