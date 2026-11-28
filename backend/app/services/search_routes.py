@@ -49,8 +49,8 @@ class DeepCheckRequest(Contract):
 class BackendFactory:
     """Lazy imports/configuration. Preflight does not create clients or connect SQL."""
     def preflight(self, settings, *, external):
-        if settings.environment != 'development':
-            fail(503, 'SEARCH_DISABLED', '搜索运行尚未开放；测试必须注入离线服务。')
+        if settings.environment == 'test':
+            fail(503, 'SEARCH_DISABLED', '测试环境必须注入离线搜索服务。')
         from app.persistence.search_database import SearchDatabaseSettings
         database = SearchDatabaseSettings()
         provider = github = None
@@ -58,8 +58,8 @@ class BackendFactory:
             from app.core.settings import ExtractionSettings
             from app.services.github_client import GitHubSettings
             provider, github = ExtractionSettings(), GitHubSettings()
-            if not provider.deepseek_api_key.get_secret_value().strip() or not github.github_token.get_secret_value().strip():
-                raise ValueError('Missing credentials')
+            if not github.github_token.get_secret_value().strip():
+                raise ValueError('Missing GitHub credentials')
         return database, provider, github
 
     @contextmanager
@@ -303,8 +303,10 @@ def install_routes(app, state, owner, settings, factory=None):
 
     def config(external, request=None):
         try:
-            configuration = factory.preflight(settings, external=external)
             key = request.headers.get('x-llm-api-key') if request is not None and external else None
+            if external and settings.environment != 'test' and not (key and key.strip()):
+                fail(422, 'LLM_API_KEY_REQUIRED', '请先在页面填写模型 API Key；未填写时不能调用模型。')
+            configuration = factory.preflight(settings, external=external)
             if key is not None:
                 if not (isinstance(configuration, tuple) and len(configuration) == 3
                         and configuration[1] is not None):

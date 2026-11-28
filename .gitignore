@@ -11,3 +11,10 @@ dist/
 data/
 coverage/
 *.log
+.idea/
+.qoder-credits/
+docs/archive/
+backend/validate_*.py
+backend/dev_preview.py
+frontend/browser-*.mjs
+frontend/deep-review-browser-demo.mjs

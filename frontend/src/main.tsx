@@ -25,7 +25,7 @@ function App() {
   const [tab, setTab] = useState<'text' | 'segments'>('text')
   const [dragging, setDragging] = useState(false)
   const [llmKey, setLlmKey] = useState('')
-  const [llmNotice, setLlmNotice] = useState('')
+  const [llmNotice, setLlmNotice] = useState('未填写模型 Key；需求提取、搜索和深度核查不可用。')
   const lock = useRef(false)
   const input = useRef<HTMLInputElement>(null)
   const polling = useRef<AbortController | null>(null)
@@ -159,10 +159,10 @@ function App() {
     <header className="topbar"><a className="brand" href="./"><span className="logo">P</span>ProjectPilot<span className="brand-sub">项目领航</span></a><span className="workspace"><i />个人工作区</span></header>
     <main>
       <section className="card llm-key-card">
-        <div><span className="section-index">MODEL CREDENTIAL</span><h3>使用你自己的大模型 API Key</h3><p>仅保存在当前页面内存，不写入浏览器存储或服务端文件；刷新页面后需重新输入。未填写时使用服务端开发配置。</p></div>
+        <div><span className="section-index">MODEL CREDENTIAL</span><h3>使用你自己的大模型 API Key</h3><p>必须填写；未填写时需求提取、搜索规划和深度核查不可用。仅保存在当前页面内存，不写入浏览器存储或服务端文件；刷新页面后需重新输入。</p></div>
         <div className="llm-key-controls">
           <input type="password" value={llmKey} autoComplete="off" spellCheck={false} placeholder="DeepSeek API Key（sk-…）" onChange={event => setLlmKey(event.target.value)} />
-          <button className="secondary" onClick={() => { setLlmApiKey(llmKey); setLlmNotice(llmKey.trim() ? '已应用到当前页面的模型请求。' : '已清除用户 Key，将使用服务端开发配置。') }}>保存 Key</button>
+          <button className="secondary" onClick={() => { setLlmApiKey(llmKey); setLlmNotice(llmKey.trim() ? '已应用到当前页面的模型请求。' : '已清除用户 Key，模型功能将不可用。') }}>保存 Key</button>
           {llmNotice && <small role="status">{llmNotice}</small>}
         </div>
       </section>

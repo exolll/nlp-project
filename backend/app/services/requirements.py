@@ -249,17 +249,17 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
         raise ValueError('Injected model transport is permitted only for tests with MockTransport.')
 
     def provider_config(request):
-        if settings.environment == 'production':
-            fail(503, 'EXTRACTION_NOT_PUBLIC', '付费提取尚未开放生产环境闸门，仅开发环境可用。')
         if settings.environment == 'test' and (transport is None or provider_settings is None):
             fail(503, 'EXTRACTION_DISABLED', '测试环境仅允许显式 MockTransport，不进行真实调用。')
         try:
+            user_key = request.headers.get('x-llm-api-key')
+            if settings.environment != 'test' and not (user_key and user_key.strip()):
+                fail(422, 'LLM_API_KEY_REQUIRED', '请先在页面填写模型 API Key；未填写时不能调用模型。')
             config = provider_settings if provider_settings is not None else ExtractionSettings()
             config = ExtractionSettings.model_validate(config.model_dump())
-            user_key = request.headers.get('x-llm-api-key')
             if user_key is not None:
                 config = with_user_llm_key(config, user_key)
-            if not config.deepseek_api_key.get_secret_value().strip():
+            if settings.environment == 'test' and not config.deepseek_api_key.get_secret_value().strip():
                 fail(503, 'EXTRACTION_DISABLED', '需求提取尚未配置模型凭据；输入、编辑和查询仍可使用。')
             return config
         except ValidationError:

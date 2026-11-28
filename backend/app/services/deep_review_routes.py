@@ -103,17 +103,17 @@ def install_routes(app, state, owner, settings, provider_settings=None, transpor
     factory = search_backend_factory or BackendFactory()
 
     def provider_config(request):
-        if settings.environment == 'production':
-            fail(503, 'DEEP_REVIEW_NOT_PUBLIC', '付费深度核查尚未开放生产环境闸门。')
         if settings.environment == 'test' and (transport is None or provider_settings is None):
             fail(503, 'DEEP_REVIEW_DISABLED', '测试环境仅允许显式 MockTransport，不进行真实调用。')
         try:
+            user_key = request.headers.get('x-llm-api-key')
+            if settings.environment != 'test' and not (user_key and user_key.strip()):
+                fail(422, 'LLM_API_KEY_REQUIRED', '请先在页面填写模型 API Key；未填写时不能调用模型。')
             provider = provider_settings if provider_settings is not None else ExtractionSettings()
             provider = ExtractionSettings.model_validate(provider.model_dump())
-            user_key = request.headers.get('x-llm-api-key')
             if user_key is not None:
                 provider = with_user_llm_key(provider, user_key)
-            if not provider.deepseek_api_key.get_secret_value().strip():
+            if settings.environment == 'test' and not provider.deepseek_api_key.get_secret_value().strip():
                 fail(503, 'DEEP_REVIEW_DISABLED', '深度核查尚未配置模型凭据。')
             return provider
         except ValidationError:

@@ -492,15 +492,15 @@ def test_session_budget_and_active_limit_persistent(api_factory, monkeypatch):
     assert start(capped, headers, d3).json()['error_code'] == 'SESSION_EXTRACTION_LIMIT'
 
 
-def test_production_paid_gate_but_read_edit_work(api_factory):
+def test_production_requires_user_key_but_read_edit_work(api_factory):
     client, _, _ = api_factory()
     headers, _, did = prepare(client)
     parent = extracted(client, headers, did)
     _, _, other_doc = prepare(client, headers)
     config = api_factory.settings.model_copy(update={'environment': 'production', 'storage_backend': 's3'})
     production, _, _ = api_factory(config, injected=False)
-    response = start(production, headers, other_doc)
-    assert response.status_code == 503 and response.json()['error_code'] == 'EXTRACTION_NOT_PUBLIC'
+    missing = start(production, headers, other_doc)
+    assert missing.status_code == 422 and missing.json()['error_code'] == 'LLM_API_KEY_REQUIRED'
     assert read(production, headers, did)['revisions'][0] == parent
     assert edit(production, headers, parent['revision_id'], body_for(parent)).status_code == 201
     assert len(api_factory.calls) == 1
@@ -514,17 +514,25 @@ def test_test_environment_never_enables_live_from_environment(api_factory, monke
     assert api_factory.calls == []
 
 
-def test_unconfigured_or_misconfigured_provider_does_not_block_input(api_factory, monkeypatch):
+def test_missing_user_key_blocks_extraction_without_breaking_input(api_factory):
     config = api_factory.settings.model_copy(update={'environment': 'development'})
-    for misconfigured in [False, True]:
-        if misconfigured:
-            monkeypatch.setenv('DEEPSEEK_BASE_URL', 'https://not-official.invalid')
-        with TestClient(create_app(config, api_factory.storage)) as client:
-            headers, _, did = prepare(client)
-            assert client.get('/api/v1/config').status_code == 200
-            response = start(client, headers, did)
-            assert response.status_code == 503
-            assert response.json()['error_code'] == ('EXTRACTION_MISCONFIGURED' if misconfigured else 'EXTRACTION_DISABLED')
+    with TestClient(create_app(config, api_factory.storage)) as client:
+        headers, _, did = prepare(client)
+        assert client.get('/api/v1/config').status_code == 200
+        response = start(client, headers, did)
+        assert response.status_code == 422
+        assert response.json()['error_code'] == 'LLM_API_KEY_REQUIRED'
+    assert api_factory.calls == []
+
+
+def test_misconfigured_provider_with_user_key_returns_config_error(api_factory, monkeypatch):
+    monkeypatch.setenv('DEEPSEEK_BASE_URL', 'https://not-official.invalid')
+    config = api_factory.settings.model_copy(update={'environment': 'development'})
+    with TestClient(create_app(config, api_factory.storage)) as client:
+        headers, _, did = prepare(client)
+        response = start(client, {**headers, 'X-LLM-API-Key': 'sk-test-user-key'}, did)
+        assert response.status_code == 503
+        assert response.json()['error_code'] == 'EXTRACTION_MISCONFIGURED'
     assert api_factory.calls == []
 
 

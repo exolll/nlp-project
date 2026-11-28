@@ -316,6 +316,16 @@ def test_default_backend_test_gate_never_loads_configuration(api):
     assert not api.calls
 
 
+def test_production_search_requires_user_key(api):
+    settings = api.settings.model_copy(update={'environment': 'production', 'storage_backend': 's3'})
+    with TestClient(create_app(settings, api.storage)) as client:
+        response = client.post(f'/api/v1/tasks/{api.tid}/search-runs', json=api.body,
+                               headers={**api.headers, 'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 422
+    assert response.json()['error_code'] == 'LLM_API_KEY_REQUIRED'
+    assert not api.calls
+
+
 def test_rate_limit_does_not_charge_duplicate_or_dispatch(api):
     key = str(uuid4())
     result = start(api, key=key)

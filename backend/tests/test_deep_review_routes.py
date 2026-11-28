@@ -332,12 +332,13 @@ def test_report_hash_mismatch_is_rejected_without_rewrite(deep_api):
     assert deep_api.manifests.read(deep_api.identity, deep_api.run_id) == manifest
 
 
-def test_test_and_production_gates_do_not_call_provider(deep_api):
-    for environment in ('test', 'production'):
+def test_test_gate_and_production_key_requirement_do_not_call_provider(deep_api):
+    for environment, status, code in (('test', 503, 'DEEP_REVIEW_DISABLED'),
+                                      ('production', 422, 'LLM_API_KEY_REQUIRED')):
         settings = deep_api.settings.model_copy(update={'environment': environment})
         app = create_app(settings, deep_api.storage, search_backend_factory=deep_api.factory)
         with TestClient(app) as client:
             result = client.post(deep_api.url, headers=deep_api.headers, json=deep_api.body)
-            assert result.status_code == 503
-            assert result.json()['error_code'] in ('DEEP_REVIEW_DISABLED', 'DEEP_REVIEW_NOT_PUBLIC')
+            assert result.status_code == status
+            assert result.json()['error_code'] == code
     assert deep_api.factory.calls == deep_api.factory.opens == 0
