@@ -9,9 +9,15 @@ export class Failure extends Error {
 }
 const base = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
 const tokenKey = 'projectpilot.session'
+// 用户模型 Key 仅保存在页面内存；刷新即清空，绝不写入浏览器存储、URL 或日志。
 let llmApiKey = ''
-export function setLlmApiKey(value: string) { llmApiKey = value.trim() }
-export function hasLlmApiKey() { return !!llmApiKey }
+const keyListeners = new Set<() => void>()
+export function setLlmApiKey(value: string) { llmApiKey = value.trim(); keyListeners.forEach(fn => fn()) }
+export function hasLlmApiKey(): boolean { return !!llmApiKey }
+export function subscribeLlmKey(fn: () => void): () => void { keyListeners.add(fn); return () => { keyListeners.delete(fn) } }
+// 仅四个计费 POST 端点携带 Key；普通 GET、上传、编辑与确认不携带。
+const paidEndpoint = /\/(requirement-extractions|search-runs|deep-check|deep-review)$/
+export function carriesLlmKey(path: string, method: string): boolean { return !!llmApiKey && method === 'POST' && paidEndpoint.test(path) }
 export function session(): { access_token: string; expires_at: string } | null {
   try { return JSON.parse(sessionStorage.getItem(tokenKey) || 'null') } catch { return null }
 }
@@ -21,7 +27,7 @@ function failure(status: number, body?: Partial<ApiError>): Failure {
 export async function request<T>(path: string, method = 'GET', signal?: AbortSignal, payload: unknown = {}, key?: string): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${base}${path}`, { method, signal, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}), ...(llmApiKey ? { 'X-LLM-API-Key': llmApiKey } : {}), ...(session()?.access_token ? { Authorization: `Bearer ${session()!.access_token}` } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(payload) } : {}) })
+    response = await fetch(`${base}${path}`, { method, signal, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}), ...(carriesLlmKey(path, method) ? { 'X-LLM-API-Key': llmApiKey } : {}), ...(session()?.access_token ? { Authorization: `Bearer ${session()!.access_token}` } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(payload) } : {}) })
   } catch (e) { if (signal?.aborted) throw e; throw failure(0) }
   const body = await response.json().catch(() => null)
   if (!response.ok) throw failure(response.status, body)

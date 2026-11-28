@@ -65,13 +65,22 @@ export interface SearchEvidence {
   candidates: { repository_id: string; availability: string; source: { snapshot_id: string; commit_sha: string; readme_path: string; blob_sha: string; content_hash: string } | null; items: EvidenceItem[] }[]
 }
 export const searchPayload = (revision: string): SearchPayload => ({ revision_id: revision, consent: true, budget: { ...searchBudget } })
+// 结构校验与后端 SearchBudget 一致：接受旧预算（如 15/5）的历史预留记录，重试仍原样发送预留 payload。
+function reservedPayloadValid(payload: SearchPayload | undefined, revision: string): boolean {
+  const budget = payload?.budget
+  if (!payload || payload.revision_id !== revision || payload.consent !== true || !budget) return false
+  const int = (value: number, low: number, high: number) => Number.isInteger(value) && value >= low && value <= high
+  return budget.model_calls === 1 && int(budget.github_requests, 1, 20) && int(budget.search_requests, 1, 9)
+    && int(budget.readme_candidates, 0, 5) && int(budget.per_page, 1, 5) && budget.max_pages === 1
+    && budget.github_requests >= budget.search_requests + 2 * budget.readme_candidates
+}
 // Fail closed when storage is unavailable/corrupt: losing this key could charge twice.
 export function restoreSearch(storage: Pick<Storage, 'getItem'>, key: string, revision: string): SearchAttempt | null {
   const raw = storage.getItem(key)
   if (!raw) return null
   const value = JSON.parse(raw) as SearchAttempt
   if (!value || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.key) ||
-      JSON.stringify(value.payload) !== JSON.stringify(searchPayload(revision)) ||
+      !reservedPayloadValid(value.payload, revision) ||
       !(value.run_id === null || typeof value.run_id === 'string')) throw new Error('搜索记录无效；为避免重复调用，已阻止提交。请恢复会话存储，不要删除记录重试。')
   return value
 }
@@ -354,7 +363,7 @@ const isRanking = (value: unknown, repositories: DeepReviewRepository[]): value 
 }
 
 export interface DeepReviewReport {
-  schema_version: number; version: string; owner: string; task_id: string; run_id: string; confirmed_revision_id: string
+  schema_version: number; version: string; owner?: string; task_id: string; run_id: string; confirmed_revision_id: string
   operation_id: string; revision_hash: string; plan_hash: string; bundle_hash: string; model: string; prompt_version: string
   notice: string; created_at: string; status: Exclude<DeepReviewStatus, 'running'>
   repositories: DeepReviewRepository[]
