@@ -24,6 +24,7 @@ import { clearDraft, readDraft, writeDraft } from './draft'
 import type { DraftFileHint, InputDraft } from './draft'
 import { inputLimit, validateFileChoice } from './inputRules'
 import { listTasks, readInput, readInputStatus } from './services/tasks'
+import { newId } from './uuid'
 import { capabilities } from './capabilities'
 import './styles.css'
 
@@ -82,7 +83,7 @@ function App() {
   const [toast, setToast] = useState('')
   const [restoreNotice, setRestoreNotice] = useState('')
   const [restoreTick, setRestoreTick] = useState(0)
-  const [draftId] = useState(() => initialDraft.draft?.draftId ?? crypto.randomUUID())
+  const [draftId] = useState(() => initialDraft.draft?.draftId ?? newId())
   const lock = useRef(false)
   const draftSuppressed = useRef(false)
   const polling = useRef<AbortController | null>(null)
@@ -129,7 +130,7 @@ function App() {
     })
   }
   const autosave = autosaveRef.current
-  const draftIdRef = useRef(initialDraft.draft?.draftId ?? crypto.randomUUID())
+  const draftIdRef = useRef(initialDraft.draft?.draftId ?? newId())
   const draftSaveRef = useRef<ReturnType<typeof createAutosave<DraftJob>> | null>(null)
   if (!draftSaveRef.current) {
     draftSaveRef.current = createAutosave<DraftJob>({
@@ -277,7 +278,7 @@ function App() {
     draftSuppressed.current = true
     draftSave.cancel()
     try { clearDraft(localStorage) } catch { /* 本地存储不可用不影响已提交材料 */ }
-    draftIdRef.current = crypto.randomUUID()
+    draftIdRef.current = newId()
     setFile(null); setText(''); setFileHint(null); setRestoredBanner('')
     setDraftStatus('idle'); setDraftMessage('')
   }
@@ -298,7 +299,7 @@ function App() {
         saveTasks([task, ...tasks]); setActive(task.task_id); setDoc(null); setAutoExtractDoc(null)
         navigate({ kind: 'task', taskId: task.task_id, stage: 1 })
         commitQuiet(state => uiStore.patchTask(state, task.task_id, { stage: 1 }))
-        attempt = { task: task.task_id, key: crypto.randomUUID(), file, text }
+        attempt = { task: task.task_id, key: newId(), file, text }
         setPending(attempt)
       }
       setActive(attempt.task); setNotice('正在上传材料…'); setProgress(0)
