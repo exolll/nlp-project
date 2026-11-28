@@ -172,6 +172,15 @@ def _keyword(token):
             and token.casefold() not in {'and', 'or', 'not'})
 
 
+def _language_mentioned(language, text):
+    if language not in FILTER_LANGUAGES:
+        return False
+    if language == text:
+        return True
+    tokens = {token.casefold() for token in re.findall(r'[A-Za-z][A-Za-z0-9+#.-]*', text)}
+    return language.casefold() in tokens
+
+
 def _query_text(terms, technical):
     if technical:
         return ' '.join(sorted({term.text if _keyword(term.text) else '"' + term.text + '"'
@@ -238,7 +247,7 @@ def query_normalization(raw, revision):
                     pointers = {term.get('source') for term in terms}
                     if not (pointer in pointers and item.modality == 'required'
                             and item.operator == 'not_applicable' and item.logic_group_id is None
-                            and item.text == language_filter and item.text in FILTER_LANGUAGES):
+                            and _language_mentioned(language_filter, item.text)):
                         warnings.append({'group': group.get('name'), 'query_index': index,
                                          'dropped_language_filter': language_filter})
     return warnings
@@ -282,7 +291,9 @@ def compile_draft(raw, revision, run_id, operation):
                     _require(len(languages_used) <= 1)
                 for term in terms:
                     item = sources[term.source]
-                    if item.field in GROUP_FIELDS['C']:
+                    if item.field == 'programming_languages':
+                        _require(term.text == item.text or _language_mentioned(term.text, item.text))
+                    elif item.field in GROUP_FIELDS['C']:
                         _require(term.text == item.text)
                     _require(bool(term.text.strip()) and not any(
                         ord(c) < 32 or 127 <= ord(c) <= 159 or c in ('"', "'", '\\', ':')
@@ -305,7 +316,7 @@ def compile_draft(raw, revision, run_id, operation):
                     pointer, item = languages[0]
                     if not (pointer in pointers and item.modality == 'required'
                             and item.operator == 'not_applicable' and item.logic_group_id is None
-                            and item.text == language_filter and item.text in FILTER_LANGUAGES):
+                            and _language_mentioned(language_filter, item.text)):
                         language_filter = None
                 text = _query_text(terms, group.name == 'C')
                 fields = canonicalize_query(text, language_filter=language_filter, qualifiers=qualifiers)

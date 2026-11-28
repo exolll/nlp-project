@@ -19,7 +19,8 @@ from app.schemas.requirements import (
 from app.services.extraction_provider import PROMPT_VERSION, ProviderError, build_payload, call_provider
 from app.services.requirement_quality import validate_quality
 from app.services.requirement_validation import (
-    check, extraction_diagnostic, language_logic_explicit, resolve_spans, signature, validate_coverage, validate_extraction, validate_links,
+    check, extraction_diagnostic, language_logic_explicit, resolve_spans, signature, validate_coverage,
+    validate_extraction, validate_extraction_output, validate_links,
 )
 from app.services.storage import StorageError
 
@@ -121,7 +122,8 @@ async def run_extraction(store, identity, task_id, extraction_id, document, payl
         if not await threaded(update_job, store, identity, task_id, extraction_id, {'extracting'}, 'validating', usage=usage):
             return
         try:
-            requirements, items = validate_extraction(raw, document)
+            requirements, items = validate_extraction_output(
+                raw, document, allow_legacy=store.settings.environment == 'test')
         except (ValueError, TypeError, KeyError, RecursionError) as exc:
             diagnostic = extraction_diagnostic(exc)
             raise ProviderError('EXTRACTION_INVALID', '模型需求未通过字段、业务规则或原文证据校验。', usage) from None

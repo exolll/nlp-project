@@ -88,6 +88,30 @@ class ModelExtraction(StrictContract):
     requirement_items: list[ItemEdit]
 
 
+class DraftEvidence(StrictContract):
+    original_text: Nonempty
+    segment_id: Nonempty | None = None
+
+
+class DraftUncertainty(StrictContract):
+    reason: Nonempty
+    question: Nonempty
+
+
+class DraftItem(StrictContract):
+    field: RequirementField
+    text: Nonempty
+    evidence: list[DraftEvidence] = Field(min_length=1)
+    logic_group_id: str | None = None
+    operator: Operator = 'not_applicable'
+    uncertainty: DraftUncertainty | None = None
+
+
+class ModelExtractionDraft(StrictContract):
+    requirement_items: list[DraftItem]
+    missing_information: list[str]
+
+
 class RevisionEdit(ModelExtraction):
     change_reason: Annotated[str, Field(min_length=1, max_length=2000)]
 

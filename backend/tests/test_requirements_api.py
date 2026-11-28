@@ -108,8 +108,13 @@ def test_private_validation_diagnostic_redacts_model_content(api_factory, invali
     elif invalid == 'schema':
         raw['requirements'][secret] = secret
     else:
-        raw['requirements']['required_features'][0] = '禁止实现检索'
-        raw['requirement_items'][0]['text'] = '禁止实现检索'
+        raw['requirements']['required_features'] = None
+        raw['requirements']['preferred_features'] = ['禁止实现检索']
+        raw['requirements']['source_evidence'] = raw['requirements']['source_evidence'][:1]
+        raw['requirements']['source_evidence'][0]['field'] = 'preferred_features'
+        raw['requirement_items'] = raw['requirement_items'][:1]
+        raw['requirement_items'][0].update(field='preferred_features', value_path='preferred_features[0]',
+                                           text='禁止实现检索', modality='preferred')
     api_factory.behavior['raw'] = raw
     assert start(client, headers, did).status_code == 202
     public = read(client, headers, did)
@@ -148,6 +153,30 @@ def test_frozen_shapes_idempotency_usage_and_restart(api_factory):
     assert len(result['revisions'][0]['requirements']) == 12
     assert 'deepseek_api_key' not in client.get('/api/v1/config').text
     assert b'test-only' not in state.storage.get(state.session_key(owner(headers)))
+
+
+def test_item_only_draft_becomes_compatible_revision(api_factory):
+    client, _, _ = api_factory()
+    headers, _, did = prepare(client)
+    api_factory.behavior['raw'] = {
+        'requirement_items': [{
+            'field': 'required_features', 'text': '实现检索',
+            'evidence': [{'segment_id': 'SEG-001', 'original_text': '实现检索。'}],
+        }],
+        'missing_information': [],
+    }
+    assert start(client, headers, did).status_code == 202
+    public = read(client, headers, did)
+    assert public['extraction']['status'] == 'completed'
+    revision = public['revisions'][0]
+    assert revision['requirements']['required_features'] == ['实现检索']
+    item = revision['requirement_items'][0]
+    assert item['value_path'] == 'required_features[0]'
+    assert item['modality'] == 'required'
+    evidence = revision['requirements']['source_evidence'][0]
+    assert evidence['requirement_item_id'] == item['requirement_item_id']
+    assert evidence['field'] == 'required_features'
+    assert evidence['start_offset'] == 0 and evidence['end_offset'] == len('实现检索。')
 
 
 def test_reorder_stable_ids_and_changed_item_new_id_logs(api_factory):

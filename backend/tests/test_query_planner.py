@@ -550,6 +550,32 @@ def test_no_sources_all_skipped(h):
     assert h.calls == 0
 
 
+def test_language_name_inside_requirement_text_is_accepted(h):
+    h.revision.requirements.programming_languages = ['使用 Python 实现原型']
+    items(h.revision)
+    h.body['groups'][2] = {
+        'name': 'C', 'status': 'ready', 'sources': ['/programming_languages/0'], 'skip_reason': None,
+        'queries': [{'terms': [{'text': 'Python', 'source': '/programming_languages/0'}],
+                     'language_filter': 'Python', 'qualifiers': {}}]}
+    plan = h.run()
+    query = plan.groups[2].queries[0]
+    assert query.language_filter == 'Python'
+    assert query.source_requirement_pointers == ['/programming_languages/0']
+    assert not any('dropped_language_filter' in row
+                   for row in h.manifest()['planner_operation'].get('query_normalization', []))
+
+
+def test_language_name_absent_from_requirement_text_is_rejected(h):
+    h.revision.requirements.programming_languages = ['使用 Java 实现原型']
+    items(h.revision)
+    h.body['groups'][2] = {
+        'name': 'C', 'status': 'ready', 'sources': ['/programming_languages/0'], 'skip_reason': None,
+        'queries': [{'terms': [{'text': 'Python', 'source': '/programming_languages/0'}],
+                     'language_filter': 'Python', 'qualifiers': {}}]}
+    with pytest.raises(PlannerError, match='PLANNER_INVALID_DRAFT'):
+        h.run()
+
+
 def test_composite_language_filter_is_dropped_with_warning(h):
     language_case(h, ['Python or Java'])
     plan = h.run()
