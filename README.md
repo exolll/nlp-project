@@ -1,139 +1,102 @@
-# ProjectPilot
+# ProjectPilot 比赛版
 
-ProjectPilot 是一个面向课程作业场景的 AI 项目调研助手：上传作业材料后，系统提取并确认需求，搜索 GitHub 候选仓库，采集 README 证据，进行检索与深度核查，最后输出带原文证据的项目评估和推荐报告。
+ProjectPilot 帮助学生把课程作业要求转成可核对的需求，再搜索 GitHub，找出与需求匹配的项目。用户可以上传 PDF 或 DOCX，也可以直接输入文字。**确认需求后才开始搜索**。最终结果展示仓库排名、逐项匹配判断和对应证据。
 
-## 功能
+本文对应 `master` 运行版。
 
-- 上传 PDF、DOCX 或纯文本作业材料
-- 使用 DeepSeek 提取需求，并支持人工编辑、确认和版本管理
-- 将确认后的需求用于 GitHub 仓库发现
-- 采集 README 快照，保留可定位的原文证据
-- 使用 BAAI/bge-m3 + Chroma 做混合检索
-- 对候选仓库进行逐仓库深度核查
-- 使用确定性 Python 逻辑生成评分、排序和推荐
-- 前端展示需求、证据、核查结果和推荐理由
+## ProjectPilot 做什么
 
-## 技术栈
+**提交作业 → 预览原文 → 提取并确认需求 → 搜索 GitHub → 查找仓库证据 → 查看排名和引用**
 
-- 后端：FastAPI、Pydantic、SQLAlchemy、Alembic、MySQL（仅搜索阶段）
-- 前端：React、TypeScript、Vite
-- 模型：DeepSeek Chat Completions
-- Embedding：SiliconFlow / BAAI/bge-m3
-- 向量检索：Chroma
-- 对象存储：本地目录（开发）或 S3 兼容存储（生产）
+| 你在页面上做什么 | 系统接着做什么 | 从哪个文件看起 |
+| --- | --- | --- |
+| 上传作业，或粘贴文字 | 接收 PDF、DOCX 或纯文字。上传文件时可以另填补充说明。解析正文并保留来源位置，供预览核对。 | [上传页面](frontend/src/main.tsx) · [文档解析](backend/app/services/parsing.py) |
+| 提取需求，修改并确认 | 从原文提取主题、硬性功能、偏好和技术约束。保存修改后的版本，搜索绑定用户最终确认的需求。 | [需求确认面板](frontend/src/RequirementsPanel.tsx) · [需求服务](backend/app/services/requirements.py) · [需求格式](backend/app/schemas/requirements.py) |
+| 开始搜索 | 把确认后的需求转成查询，调用 GitHub 获取候选仓库，并记录候选从哪条查询命中。 | [查询规划](backend/app/services/query_planner.py) · [搜索执行](backend/app/services/search_execution.py) · [GitHub 客户端](backend/app/services/github_client.py) |
+| 查看候选的相关资料 | 保存候选仓库 README 快照，切成片段。用 BM25、关键词打分和向量检索找相关内容，并融合排序。 | [README 与索引](backend/app/services/chunk_index.py) · [证据检索](backend/app/services/retrieval.py) · [证据组装](backend/app/services/evidence_bundle.py) |
+| 查看推荐排序，点开引用核对 | 逐项核查硬性条件和偏好，检查引用与快照是否对应，再汇总成排名和说明。 | [搜索与推荐面板](frontend/src/SearchPanel.tsx) · [深度核查流程](backend/app/services/deep_review_pipeline.py) · [引用校验与排序](backend/app/services/deep_review_logic.py) |
 
-## 目录结构
+例如，作业写「必须能在网页上传讲义并基于它问答，能点开引文查看原文可加分」。确认需求时，上传和问答应是硬性条件，查看引文应是偏好。拿到推荐后，打开引文核对它是否证明的是同一仓库、同一版本下的实际操作流程。
 
-```text
-backend/
-  app/            后端应用代码
-  migrations/     Alembic 迁移
-frontend/
-  src/            前端源码
-```
+前后端接口从 [FastAPI 入口](backend/app/main.py) 看起。搜索及深度核查接口分别在 [search_routes.py](backend/app/services/search_routes.py) 和 [deep_review_routes.py](backend/app/services/deep_review_routes.py)。
 
-## 快速启动
+## Windows 本地启动
 
-### 1. 环境变量
+准备 Python 3.12 或更高版本，以及可运行 Vite 的 Node.js 和 npm。以下命令以 PowerShell 为例。
 
-在项目根目录复制 `.env.example`：
-
-```text
-复制 .env.example 为 .env
-```
-
-然后按需填写：
-
-- `SILICONFLOW_API_KEY`
-- GitHub Token（如使用搜索阶段）
-- `MYSQL_*`（如使用搜索持久化）
-
-DeepSeek Key 不在服务端默认配置中保存。用户必须在页面顶部的模型凭据卡片中填写自己的 Key；未填写时提取、搜索规划和深度核查会被拒绝。
-
-`.env` 已被 Git 忽略，禁止提交真实密钥。
-
-### 2. 后端
-
-使用 Python 3.12：
-
-```text
-cd backend
+```powershell
+git clone --branch master --single-branch https://github.com/exolll/nlp-project.git
+cd nlp-project
 python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m pip install -e "./backend"
+Copy-Item .env.example .env
 ```
 
-如果使用项目根目录已有的虚拟环境，也可以直接：
+已有 `.env` 时，保留原文件并对照模板补齐字段。运行范围决定需要配置哪些服务。
 
-```text
-cd backend
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# ProjectPilot 比赛版网页测试指南
+
+## 首次准备
+
+用 PowerShell 进入 `master` 运行版的本地仓库根目录。首次运行时安装后端依赖并准备配置：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e "./backend"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-后端默认地址：
+只测上传、解析和预览时，使用本地文件存储即可。需求提取、搜索和深度核查需要在页面顶部填写用户自己的 DeepSeek Key；服务端不保存默认 DeepSeek Key。测试完整搜索和推荐前，在 `.env` 配置 GitHub Token、MySQL 和向量检索服务。
 
-```text
-http://127.0.0.1:8000
+## 启动网页
+
+打开两个 PowerShell 窗口，均从仓库根目录开始。
+
+**窗口一启动后端**
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
-### 3. 前端
+**窗口二启动前端**
 
-```text
+```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-前端默认地址：
+保持两个窗口运行，然后打开 [ProjectPilot 本地测试页面](http://127.0.0.1:5173/)。
 
-```text
-http://127.0.0.1:5173
+## 用课程作业跑一次
+
+1. 先上传一份文字可选中的 PDF，例如「课程讲义问答」。预览应保留作业正文和页码。
+2. 点击提取需求。对照原文，核查「必须」「优先」「选做」有没有被混淆。必要时编辑，再确认版本。
+3. 如果已配置完整链路，发起 GitHub 搜索，记录候选和最终排名。至少打开一条引用，验证它确实支持页面上的判断。
+4. 再用「实验报告网页导出」做对照。这份作业要求从网页生成 PDF。只证明仓库能上传 PDF 的引用不足以支持导出能力。
+
+真实 GitHub 候选会随搜索时间变化。验收时看确认后的条件、仓库是否符合以及引文是否有效。
+
+## 发现问题时怎么定位
+
+| 现象 | 先核对什么 |
+| --- | --- |
+| 页面打不开或接口失败 | 前端是否在 `5173`、后端是否在 `8000`，以及后端终端报错。 |
+| 预览缺段或顺序异常 | 对照 PDF 原页和解析预览。全扫描件可能缺少可提取的文本。 |
+| 把选做提成必须 | 保存作业原文和提取结果，看偏差是否发生在确认之前。 |
+| 需求正确，候选仍跑偏 | 记录实际查询、限定词和候选仓库。先检查检索条件和 GitHub 请求状态。 |
+| 有候选但无法进入深度核查 | 核对 MySQL 迁移、README 快照、嵌入配置和 Chroma 路径。 |
+| 排名靠前的仓库缺少功能证据 | 核对逐项判断、引用归属和原文。只验证到部分必要条件时，应如实记录。 |
+
+报告问题时保留提交号、输入样例、确认后的需求、实际查询、推荐与引用，以及最早出现偏差的步骤。
+
+## 构建检查
+
+在 `frontend` 目录运行：
+
+```powershell
+npm ci
+npm run build
 ```
 
-Vite 已配置将 `/api` 代理到 `http://127.0.0.1:8000`。
-
-## 搜索数据库
-
-搜索阶段使用 MySQL，连接配置通过 `MYSQL_*` 环境变量提供。  
-数据库结构由 `backend/migrations/` 下的 Alembic 迁移管理。
-
-在线迁移默认关闭，需显式设置：
-
-```text
-PROJECTPILOT_ALLOW_MIGRATIONS=1
-```
-
-并确认目标数据库后再执行。
-
-## 主要 API
-
-```text
-POST /api/v1/sessions
-POST /api/v1/tasks
-POST /api/v1/tasks/{task_id}/input
-GET  /api/v1/tasks/{task_id}/input
-POST /api/v1/documents/{document_id}/requirement-extractions
-GET  /api/v1/documents/{document_id}/requirements
-POST /api/v1/requirement-revisions/{revision_id}/confirm
-POST /api/v1/tasks/{task_id}/search-runs
-GET  /api/v1/tasks/{task_id}/search-runs/{run_id}
-GET  /api/v1/tasks/{task_id}/search-runs/{run_id}/retrieval-evidence
-POST /api/v1/tasks/{task_id}/search-runs/{run_id}/deep-review
-GET  /api/v1/tasks/{task_id}/search-runs/{run_id}/deep-review
-```
-
-## 重要限制
-
-- 本次提交为课程竞赛 MVP，不是生产级 SaaS。
-- 需求提取、搜索、深度核查均可能产生第三方 API 费用。
-- 不自动重试付费模型调用；失败结果需要人工确认后重新发起。
-- README 证据表示“文档中提及”，不等同于功能已经实际运行验证。
-- 本地 `data/`、Chroma 索引、日志和虚拟环境属于运行产物，不应提交。
-- 前端生产构建产物为 `frontend/dist/`，仅用于静态部署，不进入源码提交包。
-
-## 安全说明
-
-- 不要提交 `.env`、API Key、数据库密码、会话 Token 或含隐私的作业原文。
-- 生产环境使用 HTTPS，并将对象存储、MySQL 和 Chroma 保持为私有服务。
-- 用户提供的模型 Key 仅在请求期间使用，不写入数据库或日志。
+完整测试和线上验收脚本保留在开发分支，不包含在运行版 master 中。
