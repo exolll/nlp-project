@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Failure, request } from './api'
+import { newId } from './uuid'
 import SearchPanel from './SearchPanel'
 import type { NormalizedDocument } from './api'
 import {
@@ -247,7 +248,7 @@ export default function RequirementsPanel({ document, onProgress, onRunId, onCon
     if (reuse ? !canRecover : !canNewExtraction) return
     let accepted = false
     await mutate('extract', async scope => {
-      const saved = reuse ? attemptRef.current : { key: crypto.randomUUID(), state: 'unknown' as const, baseline_id: job?.extraction_id ?? null, extraction_id: null }
+      const saved = reuse ? attemptRef.current : { key: newId(), state: 'unknown' as const, baseline_id: job?.extraction_id ?? null, extraction_id: null }
       if (!saved) return
       persistAttempt({ ...saved, state: 'unknown' }); setCheckedAttempt(false)
       setNotice(auto

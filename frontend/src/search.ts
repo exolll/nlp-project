@@ -1,3 +1,5 @@
+import { newId } from './uuid'
+
 export const searchBudget = { model_calls: 1, github_requests: 15, search_requests: 5, readme_candidates: 5, per_page: 5, max_pages: 1 } as const
 export type SearchPayload = { revision_id: string; consent: true; budget: typeof searchBudget }
 export type SearchAttempt = { key: string; payload: SearchPayload; run_id: string | null }
@@ -78,7 +80,7 @@ export function restoreSearch(storage: Pick<Storage, 'getItem'>, key: string, re
 export function reserveSearch(storage: Pick<Storage, 'getItem' | 'setItem'>, key: string, revision: string): SearchAttempt {
   const previous = restoreSearch(storage, key, revision)
   if (previous) return previous
-  const attempt = { key: crypto.randomUUID(), payload: searchPayload(revision), run_id: null }
+  const attempt = { key: newId(), payload: searchPayload(revision), run_id: null }
   storage.setItem(key, JSON.stringify(attempt))
   return attempt
 }
@@ -106,7 +108,7 @@ export function restoreDeep(storage: Pick<Storage, 'getItem'>, key: string, revi
 export function reserveDeep(storage: Pick<Storage, 'getItem' | 'setItem'>, key: string, revision: string): DeepAttempt {
   const previous = restoreDeep(storage, key, revision)
   if (previous) return previous
-  const attempt = { key: crypto.randomUUID(), payload: deepPayload(revision) }
+  const attempt = { key: newId(), payload: deepPayload(revision) }
   storage.setItem(key, JSON.stringify(attempt))
   return attempt
 }
