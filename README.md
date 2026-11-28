@@ -28,12 +28,8 @@ ProjectPilot 是一个面向课程作业场景的 AI 项目调研助手：上传
 backend/
   app/            后端应用代码
   migrations/     Alembic 迁移
-  tests/          后端测试
 frontend/
   src/            前端源码
-  *.test.mjs      前端测试脚本
-docs/             设计与验收文档
-docs/archive/     历史过程文档
 ```
 
 ## 快速启动
@@ -64,7 +60,7 @@ DeepSeek Key 不在服务端默认配置中保存。用户必须在页面顶部�
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e ".[test]"
+pip install -e .
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -97,38 +93,18 @@ http://127.0.0.1:5173
 
 Vite 已配置将 `/api` 代理到 `http://127.0.0.1:8000`。
 
-## 测试
-
-### 后端
-
-```text
-cd backend
-python -m pytest
-```
-
-### 前端
-
-```text
-cd frontend
-node --test *.test.mjs
-npm run build
-```
-
 ## 搜索数据库
 
-搜索阶段使用 MySQL。建表脚本见：
+搜索阶段使用 MySQL，连接配置通过 `MYSQL_*` 环境变量提供。  
+数据库结构由 `backend/migrations/` 下的 Alembic 迁移管理。
+
+在线迁移默认关闭，需显式设置：
 
 ```text
-docs/ProjectPilot_MySQL_Create_Tables.sql
+PROJECTPILOT_ALLOW_MIGRATIONS=1
 ```
 
-数据库设计见：
-
-```text
-docs/ProjectPilot_MySQL_Design.md
-```
-
-在线 Alembic 迁移默认关闭，需显式设置 `PROJECTPILOT_ALLOW_MIGRATIONS=1` 并确认目标数据库后再执行。
+并确认目标数据库后再执行。
 
 ## 主要 API
 
